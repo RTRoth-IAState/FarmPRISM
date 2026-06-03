@@ -1,24 +1,22 @@
 {
-  "name": "FieldStat – On-Farm Trial Platform",
-  "short_name": "FieldStat",
+  "name": "On-Farm Trial Platform",
+  "short_name": "CropTrials",
   "description": "Plan, collect, and analyze on-farm trial data. Works offline.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f8f7f3",
   "theme_color": "#3B6D11",
   "orientation": "any",
-  "categories": ["agriculture", "productivity", "science"],
+  "categories": [
+    "agriculture",
+    "productivity",
+    "science"
+  ],
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTkyIj4KICA8cmVjdCB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgcng9IjQwIiBmaWxsPSIjM0I2RDExIi8+CiAgPHRleHQgeD0iOTYiIHk9IjEzMCIgZm9udC1zaXplPSIxMTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJzZXJpZiI+8J+MsTwvdGV4dD4KPC9zdmc+",
       "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
+      "type": "image/svg+xml",
       "purpose": "any maskable"
     }
   ]
