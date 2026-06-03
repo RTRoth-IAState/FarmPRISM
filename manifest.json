@@ -1,7 +1,7 @@
 {
-  "name": "On-Farm Trial Platform",
-  "short_name": "CropTrials",
-  "description": "Plan, collect, and analyze on-farm trial data. Works offline.",
+  "name": "FarmPRISM \u2013 On-Farm Trial Platform",
+  "short_name": "FarmPRISM",
+  "description": "Plot Research & Integrated Statistical Management \u2014 plan, collect and analyze on-farm trial data",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f8f7f3",
