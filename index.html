@@ -877,19 +877,8 @@ input,select,textarea,button{font-family:inherit;}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-<script src="js/weather.js"></script>
-<script src="js/yield-import.js"></script>
-<script src="js/features.js"></script>
-<script src="js/gps-plots.js"></script>
-<script src="js/reports.js"></script>
-<script src="js/extensions.js"></script>
-<script src="app.js"></script>
 
-<!-- Override old GPS functions with new module -->
-<script>
-// These will be overridden by gps-plots.js
-var _gpsModuleLoaded = false;
-</script>
+
 <!-- PWA Service Worker registration -->
 <script>
 if ('serviceWorker' in navigator) {
@@ -899,6 +888,3836 @@ if ('serviceWorker' in navigator) {
       .catch(e => console.log('SW registration failed', e));
   });
 }
+</script>
+
+<script>
+// ===== app.js =====
+// ============================================================
+// FarmPRISM – Full Application Logic
+// ============================================================
+
+// ── STATE ────────────────────────────────────────────────────
+const DB_KEY = 'farmprism_v2';
+let appState = {
+  seasons: ['2025'],
+  currentSeason: '2025',
+  trials: [],         // all trials
+  observations: [],   // all observations
+  nextTrialId: 1,
+  nextObsId: 1,
+};
+
+let currentDesign = {};         // design wizard state
+let currentCollectTrialId = null;
+let currentAnalyzeTrialId = null;
+let editingObsId = null;
+let leafletMap = null;
+let mapPlots = [];
+let drawMode = false;
+let webrReady = false;
+let webrR = null;
+let seasonChart = null;
+let residChart = null;
+let analysisResult = null;
+
+const COLORS = [
+  '#3B6D11','#185FA5','#BA7517','#993C1D',
+  '#534AB7','#0F6E56','#A32D2D','#5F5E5A',
+  '#1D9E75','#D4537E','#378ADD','#639922'
+];
+
+// ── PERSISTENCE ───────────────────────────────────────────────
+function saveState() {
+  try { localStorage.setItem(DB_KEY, JSON.stringify(appState)); } catch(e) {}
+}
+function loadState() {
+  try {
+    const s = localStorage.getItem(DB_KEY);
+    if (s) appState = { ...appState, ...JSON.parse(s) };
+  } catch(e) {}
+  if (!appState.seasons || !appState.seasons.length) appState.seasons = ['2025'];
+  if (!appState.currentSeason) appState.currentSeason = appState.seasons[0];
+}
+
+// ── OFFLINE DETECTION ─────────────────────────────────────────
+function updateOnlineStatus() {
+  const badge = document.getElementById('offline-badge');
+  if (badge) badge.classList.toggle('show', !navigator.onLine);
+}
+window.addEventListener('online', updateOnlineStatus);
+window.addEventListener('offline', updateOnlineStatus);
+
+// ── NAV ───────────────────────────────────────────────────────
+function showPage(id, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  const page = document.getElementById('page-' + id);
+  if (page) page.classList.add('active');
+  const activeBtn = btn || document.querySelector(`[data-page="${id}"]`);
+  if (activeBtn) activeBtn.classList.add('active');
+  if (id === 'trials') renderTrialsPage();
+  if (id === 'design') initDesign();
+  if (id === 'collect') populateCollectSelector();
+  if (id === 'analyze') populateAnalyzeSelector();
+  if (id === 'seasons') buildSeasonComparison();
+}
+function toggleMobileNav() {
+  document.getElementById('main-nav').classList.toggle('mobile-show');
+}
+
+// ── SEASONS ───────────────────────────────────────────────────
+function openSeasonModal() {
+  renderSeasonList();
+  openModal('season-modal');
+}
+function renderSeasonList() {
+  const el = document.getElementById('season-list');
+  el.innerHTML = appState.seasons.map(s =>
+    `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface2);border-radius:6px;margin-bottom:6px;">
+      <span style="flex:1;font-size:14px;">${s}</span>
+      <span style="font-size:12px;color:var(--text2);">${appState.trials.filter(t=>t.season===s).length} trials</span>
+      ${s === appState.currentSeason
+        ? '<span class="badge badge-green">Current</span>'
+        : `<button class="btn btn-secondary" style="padding:4px 10px;font-size:12px;" onclick="selectSeason('${s}')">Select</button>`}
+    </div>`
+  ).join('');
+}
+function addSeason() {
+  const val = document.getElementById('new-season-input').value.trim();
+  if (!val || appState.seasons.includes(val)) return;
+  appState.seasons.push(val);
+  saveState();
+  renderSeasonList();
+  document.getElementById('new-season-input').value = '';
+}
+function selectSeason(s) {
+  appState.currentSeason = s;
+  document.getElementById('current-season-label').textContent = s;
+  saveState();
+  renderSeasonList();
+  renderTrialsPage();
+}
+
+// ── TRIALS PAGE ───────────────────────────────────────────────
+function renderTrialsPage() {
+  const seasonTrials = appState.trials.filter(t => t.season === appState.currentSeason);
+  document.getElementById('season-label').textContent = `${appState.currentSeason} growing season`;
+  document.getElementById('current-season-label').textContent = appState.currentSeason;
+
+  const totalPlots = seasonTrials.reduce((s,t) => s + (t.plots?.length||0), 0);
+  const obs = appState.observations.filter(o => seasonTrials.some(t=>t.id===o.trialId));
+  const complete = seasonTrials.filter(t => {
+    const tObs = obs.filter(o=>o.trialId===t.id);
+    return t.plots?.length > 0 && tObs.length >= t.plots.length;
+  }).length;
+
+  document.getElementById('m-trials').textContent = seasonTrials.length;
+  document.getElementById('m-plots').textContent = totalPlots;
+  document.getElementById('m-obs').textContent = obs.length;
+  document.getElementById('m-complete').textContent = complete;
+
+  const list = document.getElementById('trial-list');
+  if (!seasonTrials.length) {
+    list.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text2);">
+      <div style="font-size:40px;margin-bottom:12px;">🌱</div>
+      <div style="font-size:16px;font-weight:500;margin-bottom:6px;">No trials this season</div>
+      <div style="font-size:13px;">Create your first trial to get started</div>
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = seasonTrials.map(t => {
+    const tObs = appState.observations.filter(o=>o.trialId===t.id);
+    const pct = t.plots?.length ? Math.round(tObs.length/t.plots.length*100) : 0;
+    const status = pct >= 100 ? 'Complete' : pct > 0 ? 'In progress' : 'Established';
+    const badgeClass = pct >= 100 ? 'badge-green' : pct > 0 ? 'badge-amber' : 'badge-blue';
+    const icon = { corn:'🌽', soybeans:'🫘', wheat:'🌾', sorghum:'🌾', cotton:'⚪', canola:'🌼' }[t.crop?.toLowerCase()] || '🌱';
+    return `<div class="trial-item" onclick="openTrial(${t.id})">
+      <div class="trial-icon">${icon}</div>
+      <div class="trial-info">
+        <div class="trial-name">${t.name}</div>
+        <div class="trial-meta">${t.field||'No field'} · ${t.design?.toUpperCase()||'RCBD'} · ${t.plots?.length||0} plots · ${tObs.length} obs</div>
+      </div>
+      <span class="badge ${badgeClass}">${status}</span>
+    </div>`;
+  }).join('');
+}
+
+function openTrial(id) {
+  currentCollectTrialId = id;
+  currentAnalyzeTrialId = id;
+  showPage('collect');
+  loadCollectTrial();
+}
+
+// ── DESIGN WIZARD ─────────────────────────────────────────────
+function initDesign() {
+  currentDesign = {
+    name:'', crop:'Corn', field:'', season: appState.currentSeason,
+    objective:'', variable:'Grain yield (bu/ac)',
+    design:'rcbd', reps:4, plotLen:600, plotRows:4,
+    treatments:[
+      {name:'Control', rate:'0 lb/ac', color:COLORS[0], numericRate:0},
+      {name:'Low N',   rate:'120 lb/ac', color:COLORS[1], numericRate:120},
+      {name:'Standard N', rate:'180 lb/ac', color:COLORS[2], numericRate:180},
+      {name:'High N', rate:'240 lb/ac', color:COLORS[3], numericRate:240},
+    ],
+    wpFactor:{name:'Tillage', levels:['Conv','Strip-till','No-till']},
+    spFactor:{name:'N Rate', levels:['0 lb','120 lb','180 lb']},
+    sspFactor:{name:'Fungicide', levels:['No','Yes']},
+    stripA:{name:'N Rate', levels:['0 lb','120 lb','180 lb']},
+    stripB:{name:'Population', levels:['28k','32k','36k']},
+    gpsPlots: [],
+  };
+  designStep(1);
+  onDesignChange();
+  renderTreatmentInputs();
+  renderWPLevels(); renderSPLevels(); renderSSPLevels();
+  renderStripA(); renderStripB();
+}
+
+function designStep(n) {
+  for (let i=1;i<=5;i++) {
+    const s = document.getElementById(`design-step-${i}`);
+    if(s) s.style.display = i===n ? 'block':'none';
+    const ind = document.getElementById(`step-${i}-ind`);
+    if(ind) ind.classList.toggle('active', i===n || i<n);
+  }
+  if (n===4) buildFieldMap();
+  if (n===5) initLeafletMap();
+}
+
+const DESIGN_DESC = {
+  rcbd: '📦 <strong>Recommended for most on-farm trials.</strong> Plots are grouped into blocks that account for natural field variability (soil type, slope, drainage). Each block contains one plot of every treatment, randomly assigned.',
+  crd:  '🎲 All plots are assigned treatments completely at random, with no blocking. Use only when the field is highly uniform.',
+  latin:'🔲 A square grid where each treatment appears exactly once in each row and column. Requires that number of treatments = number of rows = number of columns = replications.',
+  strip:'↔️ Factor A runs in horizontal strips; Factor B runs in vertical strips. Their intersection plots capture the interaction. Ideal for two management factors like N rate × plant population.',
+  split:'⬛ The field is divided into large whole-plots (one factor), each subdivided into sub-plots (a second factor). Gives more precision for the sub-plot factor at the cost of the whole-plot factor.',
+  splitsplit:'⬛⬛ Three-factor design with whole-plots, sub-plots, and sub-sub-plots. Ideal for testing three factors simultaneously with varying precision requirements.',
+};
+
+function onDesignChange() {
+  const d = document.getElementById('d-design')?.value || 'rcbd';
+  currentDesign.design = d;
+  document.getElementById('design-description').innerHTML = DESIGN_DESC[d] || '';
+  document.getElementById('split-setup').style.display = (d==='split'||d==='splitsplit') ? 'block':'none';
+  document.getElementById('splitsplit-setup').style.display = d==='splitsplit' ? 'block':'none';
+  document.getElementById('strip-setup').style.display = d==='strip' ? 'block':'none';
+  document.getElementById('reps-group').style.display = d==='latin' ? 'none':'flex';
+
+  const hint = document.getElementById('treatment-setup-hint');
+  if (d==='split' || d==='splitsplit' || d==='strip') {
+    hint.style.display='block';
+    hint.innerHTML = `This design uses <strong>factors with levels</strong> (defined in Step 2) instead of simple treatments. Treatments are automatically generated as factor combinations.`;
+  } else {
+    hint.style.display='none';
+  }
+  refreshDesignPreview();
+}
+
+function refreshDesignPreview() {}
+
+// Treatment inputs
+function renderTreatmentInputs() {
+  const c = document.getElementById('treatment-inputs');
+  c.innerHTML = currentDesign.treatments.map((t,i) =>
+    `<div class="trt-item" id="trt-item-${i}">
+      <div class="trt-swatch" style="background:${t.color}"></div>
+      <input type="text" value="${t.name}" style="flex:2;font-size:13px;background:transparent;border:none;color:var(--text);min-width:80px;" onchange="currentDesign.treatments[${i}].name=this.value">
+      <input type="text" value="${t.rate}" style="flex:1;font-size:12px;background:transparent;border:none;color:var(--text2);font-family:var(--font-mono);min-width:60px;" onchange="currentDesign.treatments[${i}].rate=this.value">
+      <input type="number" value="${t.numericRate||0}" style="width:60px;font-size:12px;background:var(--surface2);border:var(--border);border-radius:4px;padding:3px 6px;" placeholder="Rate#" onchange="currentDesign.treatments[${i}].numericRate=+this.value">
+      <input type="color" value="${t.color}" style="width:30px;height:28px;cursor:pointer;border:none;background:none;" onchange="currentDesign.treatments[${i}].color=this.value;document.querySelector('#trt-item-${i} .trt-swatch').style.background=this.value">
+      <button class="btn-icon" onclick="removeTreatment(${i})">🗑️</button>
+    </div>`
+  ).join('');
+}
+function addTreatmentInput() {
+  const i = currentDesign.treatments.length;
+  currentDesign.treatments.push({name:`Treatment ${i+1}`, rate:'', color:COLORS[i%COLORS.length], numericRate:0});
+  renderTreatmentInputs();
+}
+function removeTreatment(i) {
+  if (currentDesign.treatments.length <= 2) { alert('Need at least 2 treatments.'); return; }
+  currentDesign.treatments.splice(i,1);
+  renderTreatmentInputs();
+}
+
+// Factor level editors
+function renderLevelsList(containerId, levels, factorKey) {
+  const c = document.getElementById(containerId);
+  c.innerHTML = levels.map((lv,i) =>
+    `<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">
+      <input type="text" value="${lv}" style="flex:1;font-size:13px;background:var(--surface);border:var(--border);border-radius:4px;padding:6px 8px;color:var(--text);" onchange="${factorKey}[${i}]='${lv}';this.closest('[id]') && updateFactor('${factorKey}',${i},this.value)">
+      <button class="btn-icon" onclick="removeFactorLevel('${factorKey}',${i})">🗑️</button>
+    </div>`
+  ).join('') +
+  `<button class="btn-add" style="margin-top:4px;" onclick="addFactorLevel('${factorKey}')">+ Add level</button>`;
+}
+
+function renderWPLevels() {
+  const n = parseInt(document.getElementById('wp-levels')?.value||3);
+  while(currentDesign.wpFactor.levels.length < n) currentDesign.wpFactor.levels.push(`Level ${currentDesign.wpFactor.levels.length+1}`);
+  currentDesign.wpFactor.levels = currentDesign.wpFactor.levels.slice(0,n);
+  renderLevelsList('wp-levels-list', currentDesign.wpFactor.levels, 'currentDesign.wpFactor.levels');
+}
+function renderSPLevels() {
+  const n = parseInt(document.getElementById('sp-levels')?.value||3);
+  while(currentDesign.spFactor.levels.length < n) currentDesign.spFactor.levels.push(`Level ${currentDesign.spFactor.levels.length+1}`);
+  currentDesign.spFactor.levels = currentDesign.spFactor.levels.slice(0,n);
+  renderLevelsList('sp-levels-list', currentDesign.spFactor.levels, 'currentDesign.spFactor.levels');
+}
+function renderSSPLevels() {
+  const n = parseInt(document.getElementById('ssp-levels')?.value||2);
+  while(currentDesign.sspFactor.levels.length < n) currentDesign.sspFactor.levels.push(`Level ${currentDesign.sspFactor.levels.length+1}`);
+  currentDesign.sspFactor.levels = currentDesign.sspFactor.levels.slice(0,n);
+  renderLevelsList('ssp-levels-list', currentDesign.sspFactor.levels, 'currentDesign.sspFactor.levels');
+}
+function renderStripA() {
+  const n = parseInt(document.getElementById('strip-a-levels')?.value||3);
+  while(currentDesign.stripA.levels.length < n) currentDesign.stripA.levels.push(`A${currentDesign.stripA.levels.length+1}`);
+  currentDesign.stripA.levels = currentDesign.stripA.levels.slice(0,n);
+  renderLevelsList('strip-a-list', currentDesign.stripA.levels, 'currentDesign.stripA.levels');
+}
+function renderStripB() {
+  const n = parseInt(document.getElementById('strip-b-levels')?.value||3);
+  while(currentDesign.stripB.levels.length < n) currentDesign.stripB.levels.push(`B${currentDesign.stripB.levels.length+1}`);
+  currentDesign.stripB.levels = currentDesign.stripB.levels.slice(0,n);
+  renderLevelsList('strip-b-list', currentDesign.stripB.levels, 'currentDesign.stripB.levels');
+}
+
+// ── FIELD MAP BUILDER ─────────────────────────────────────────
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i=a.length-1;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
+  return a;
+}
+
+function buildFieldMap() {
+  readDesignFormValues();
+  const d = currentDesign;
+  const container = document.getElementById('field-map-container');
+  const legend = document.getElementById('map-legend');
+  container.innerHTML = '';
+  legend.innerHTML = '';
+
+  let plots = [], htmlGrid = '';
+
+  if (d.design === 'rcbd') {
+    plots = buildRCBD(d.treatments, d.reps);
+    htmlGrid = renderRCBDMap(plots, d.treatments, d.reps);
+  } else if (d.design === 'crd') {
+    plots = buildCRD(d.treatments, d.reps);
+    htmlGrid = renderCRDMap(plots, d.treatments);
+  } else if (d.design === 'latin') {
+    const n = d.treatments.length;
+    plots = buildLatinSquare(d.treatments, n);
+    htmlGrid = renderLatinMap(plots, d.treatments, n);
+  } else if (d.design === 'strip') {
+    const result = buildStripTrial(d.stripA, d.stripB, d.reps);
+    plots = result.plots;
+    htmlGrid = renderStripMap(result, d.stripA, d.stripB, d.reps);
+  } else if (d.design === 'split') {
+    const result = buildSplitPlot(d.wpFactor, d.spFactor, d.reps);
+    plots = result.plots;
+    htmlGrid = renderSplitMap(result, d.wpFactor, d.spFactor, d.reps);
+  } else if (d.design === 'splitsplit') {
+    const result = buildSplitSplitPlot(d.wpFactor, d.spFactor, d.sspFactor, d.reps);
+    plots = result.plots;
+    htmlGrid = renderSplitSplitMap(result, d.wpFactor, d.spFactor, d.sspFactor, d.reps);
+  }
+
+  container.innerHTML = htmlGrid;
+  currentDesign.builtPlots = plots;
+
+  const plotLen = d.plotLen || 600;
+  const plotRows = d.plotRows || 4;
+  const plotAc = (plotLen * plotRows * 30) / 43560;
+  document.getElementById('total-plots').textContent = plots.length;
+  document.getElementById('trial-area').textContent = `~${(plotAc * plots.length).toFixed(1)} ac`;
+
+  // Legend
+  const legendItems = getLegendItems(d);
+  legend.innerHTML = legendItems.map(item =>
+    `<div style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text2);">
+      <span style="width:10px;height:10px;border-radius:2px;background:${item.color};display:inline-block;"></span>${item.label}
+    </div>`
+  ).join('');
+}
+
+function getLegendItems(d) {
+  if (d.design === 'strip') {
+    return [
+      ...d.stripA.levels.map((lv,i)=>({label:`${d.stripA.name}: ${lv}`, color:COLORS[i]})),
+      ...d.stripB.levels.map((lv,i)=>({label:`${d.stripB.name}: ${lv}`, color:COLORS[i+d.stripA.levels.length]})),
+    ];
+  }
+  if (d.design === 'split' || d.design === 'splitsplit') {
+    return d.wpFactor.levels.map((lv,i)=>({label:`${d.wpFactor.name}: ${lv}`, color:COLORS[i]}));
+  }
+  return d.treatments.map(t=>({label:t.name, color:t.color}));
+}
+
+// RCBD
+function buildRCBD(treatments, reps) {
+  const plots = [];
+  for (let r=0;r<reps;r++) {
+    const order = shuffle(treatments.map((_,i)=>i));
+    order.forEach((ti, pos) => {
+      plots.push({ id:`${r+1}${String(pos+1).padStart(2,'0')}`, block:r+1, trtIdx:ti, trtName:treatments[ti].name, color:treatments[ti].color, factor:null });
+    });
+  }
+  return plots;
+}
+function renderRCBDMap(plots, treatments, reps) {
+  const n = treatments.length;
+  let html = `<div class="field-map-wrap"><div class="field-map" style="grid-template-columns:repeat(${n},1fr);">`;
+  for (let r=0;r<reps;r++) {
+    html += `<div class="map-label" style="grid-column:1/-1;font-size:11px;padding:4px 0;color:var(--text2);">Block ${r+1}</div>`;
+    const block = plots.filter(p=>p.block===r+1);
+    block.forEach(p => {
+      html += `<div class="plot-cell" style="background:${p.color};" title="${p.trtName} · Block ${r+1}">
+        <span class="plot-id">#${p.id}</span>
+        <span class="plot-trt">${abbreviate(p.trtName)}</span>
+      </div>`;
+    });
+  }
+  html += '</div></div>';
+  return html;
+}
+
+// CRD
+function buildCRD(treatments, reps) {
+  const all = [];
+  treatments.forEach((t,ti)=>{ for(let r=0;r<reps;r++) all.push({ti, trtName:t.name, color:t.color}); });
+  const shuffled = shuffle(all);
+  return shuffled.map((p,i)=>({id:String(i+101), block:null, trtIdx:p.ti, trtName:p.trtName, color:p.color}));
+}
+function renderCRDMap(plots, treatments) {
+  const cols = Math.ceil(Math.sqrt(plots.length));
+  let html = `<div class="field-map-wrap"><div class="field-map" style="grid-template-columns:repeat(${cols},1fr);">`;
+  plots.forEach(p => {
+    html += `<div class="plot-cell" style="background:${p.color};" title="${p.trtName}">
+      <span class="plot-id">#${p.id}</span>
+      <span class="plot-trt">${abbreviate(p.trtName)}</span>
+    </div>`;
+  });
+  html += '</div></div>';
+  return html;
+}
+
+// LATIN SQUARE — true n×n grid, each treatment once per row and column
+function buildLatinSquare(treatments, n) {
+  // Generate a proper Latin square using cyclic method then shuffle
+  const base = Array.from({length:n},(_,i)=>i);
+  let square = Array.from({length:n}, (_,r) => base.map(c=>(r+c)%n));
+  // Shuffle rows and columns for randomization
+  const rowOrder = shuffle(Array.from({length:n},(_,i)=>i));
+  const colOrder = shuffle(Array.from({length:n},(_,i)=>i));
+  const rand = rowOrder.map(r => colOrder.map(c => square[r][c]));
+
+  const plots = [];
+  for (let r=0;r<n;r++) for (let c=0;c<n;c++) {
+    const ti = rand[r][c];
+    plots.push({ id:`R${r+1}C${c+1}`, row:r+1, col:c+1, trtIdx:ti,
+      trtName:treatments[ti].name, color:treatments[ti].color });
+  }
+  return plots;
+}
+function renderLatinMap(plots, treatments, n) {
+  let html = `<div class="field-map-wrap">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;">Each row and column contains every treatment exactly once (n=${n}×${n})</div>
+    <div class="field-map" style="grid-template-columns:repeat(${n},1fr);">`;
+  for (let r=0;r<n;r++) {
+    const row = plots.filter(p=>p.row===r+1);
+    row.forEach(p => {
+      html += `<div class="plot-cell" style="background:${p.color};" title="${p.trtName} · Row ${p.row} Col ${p.col}">
+        <span class="plot-id">R${p.row}C${p.col}</span>
+        <span class="plot-trt">${abbreviate(p.trtName)}</span>
+      </div>`;
+    });
+  }
+  html += '</div></div>';
+  return html;
+}
+
+// STRIP TRIAL — randomized within reps, proper intersection plots
+function buildStripTrial(stripA, stripB, reps) {
+  const plots = [];
+  for (let rep=0;rep<reps;rep++) {
+    const rowOrder = shuffle(Array.from({length:stripA.levels.length},(_,i)=>i));
+    const colOrder = shuffle(Array.from({length:stripB.levels.length},(_,i)=>i));
+    rowOrder.forEach((ai, ri) => {
+      colOrder.forEach((bi, ci) => {
+        plots.push({
+          id:`R${rep+1}-A${ai+1}B${bi+1}`, rep:rep+1,
+          aIdx:ai, bIdx:bi,
+          aLevel:stripA.levels[ai], bLevel:stripB.levels[bi],
+          trtName:`${stripA.levels[ai]} × ${stripB.levels[bi]}`,
+          aColor:COLORS[ai], bColor:COLORS[bi+stripA.levels.length],
+        });
+      });
+    });
+  }
+  return { plots, rowOrders: [], colOrders:[] };
+}
+function renderStripMap({plots}, stripA, stripB, reps) {
+  const nA = stripA.levels.length, nB = stripB.levels.length;
+  let html = `<div class="field-map-wrap">`;
+  html += `<div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
+    Horizontal strips = ${stripA.name} · Vertical strips = ${stripB.name} · ${reps} reps side by side
+  </div>`;
+
+  for (let rep=0;rep<reps;rep++) {
+    html += `<div style="margin-bottom:12px;">
+      <div class="map-label" style="font-size:11px;color:var(--text2);margin-bottom:4px;">Rep ${rep+1}</div>
+      <div style="display:grid;grid-template-columns:60px repeat(${nB},1fr);gap:2px;">`;
+
+    // Column headers (Factor B)
+    html += `<div></div>`;
+    stripB.levels.forEach((lv,bi) => {
+      html += `<div style="font-size:10px;text-align:center;padding:3px;background:${COLORS[bi+nA]};color:white;border-radius:4px 4px 0 0;">${lv}</div>`;
+    });
+
+    // Rows (Factor A)
+    for (let ai=0;ai<nA;ai++) {
+      html += `<div style="font-size:10px;display:flex;align-items:center;padding:2px 4px;background:${COLORS[ai]};color:white;border-radius:4px 0 0 4px;">${stripA.levels[ai]}</div>`;
+      for (let bi=0;bi<nB;bi++) {
+        const plot = plots.find(p=>p.rep===rep+1&&p.aIdx===ai&&p.bIdx===bi);
+        html += `<div class="plot-cell" style="background:linear-gradient(135deg,${COLORS[ai]} 50%,${COLORS[bi+nA]} 50%);min-height:40px;" title="${plot?.trtName}">
+          <span class="plot-id">${plot?.id||''}</span>
+        </div>`;
+      }
+    }
+    html += `</div></div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+// SPLIT-PLOT
+function buildSplitPlot(wpFactor, spFactor, reps) {
+  const plots = [];
+  for (let rep=0;rep<reps;rep++) {
+    const wpOrder = shuffle(Array.from({length:wpFactor.levels.length},(_,i)=>i));
+    wpOrder.forEach((wi, wpos) => {
+      const spOrder = shuffle(Array.from({length:spFactor.levels.length},(_,i)=>i));
+      spOrder.forEach((si, spos) => {
+        plots.push({
+          id:`B${rep+1}W${wi+1}S${si+1}`, block:rep+1,
+          wpIdx:wi, spIdx:si,
+          wpLevel:wpFactor.levels[wi], spLevel:spFactor.levels[si],
+          trtName:`${wpFactor.levels[wi]} / ${spFactor.levels[si]}`,
+          wpColor:COLORS[wi], spColor:COLORS[si+wpFactor.levels.length],
+        });
+      });
+    });
+  }
+  return {plots};
+}
+function renderSplitMap({plots}, wpFactor, spFactor, reps) {
+  const nWP = wpFactor.levels.length, nSP = spFactor.levels.length;
+  let html = `<div class="field-map-wrap">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
+      Large cells = <strong>${wpFactor.name}</strong> (whole plots) · Each divided into <strong>${spFactor.name}</strong> sub-plots
+    </div>`;
+
+  for (let rep=0;rep<reps;rep++) {
+    html += `<div style="margin-bottom:12px;">
+      <div class="map-label" style="font-size:11px;color:var(--text2);margin-bottom:4px;">Block ${rep+1}</div>
+      <div style="display:grid;grid-template-columns:repeat(${nWP},1fr);gap:4px;">`;
+    const wpOrder = [...new Set(plots.filter(p=>p.block===rep+1).map(p=>p.wpIdx))];
+    wpOrder.forEach(wi => {
+      const spPlots = plots.filter(p=>p.block===rep+1&&p.wpIdx===wi);
+      html += `<div style="border:2px solid ${COLORS[wi]};border-radius:6px;overflow:hidden;">
+        <div style="background:${COLORS[wi]};color:white;font-size:11px;padding:3px 6px;font-weight:500;">${wpFactor.levels[wi]}</div>
+        <div style="display:grid;grid-template-columns:repeat(${nSP},1fr);gap:2px;padding:3px;">`;
+      spPlots.forEach(p => {
+        html += `<div class="plot-cell" style="background:${p.spColor};min-width:40px;min-height:38px;" title="${p.trtName}">
+          <span class="plot-id">${p.id}</span>
+          <span class="plot-trt">${abbreviate(p.spLevel)}</span>
+        </div>`;
+      });
+      html += `</div></div>`;
+    });
+    html += `</div></div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+// SPLIT-SPLIT-PLOT
+function buildSplitSplitPlot(wpFactor, spFactor, sspFactor, reps) {
+  const plots = [];
+  for (let rep=0;rep<reps;rep++) {
+    const wpOrder = shuffle(Array.from({length:wpFactor.levels.length},(_,i)=>i));
+    wpOrder.forEach(wi => {
+      const spOrder = shuffle(Array.from({length:spFactor.levels.length},(_,i)=>i));
+      spOrder.forEach(si => {
+        const sspOrder = shuffle(Array.from({length:sspFactor.levels.length},(_,i)=>i));
+        sspOrder.forEach(ssi => {
+          plots.push({
+            id:`B${rep+1}W${wi}S${si}SS${ssi}`, block:rep+1,
+            wpIdx:wi, spIdx:si, sspIdx:ssi,
+            wpLevel:wpFactor.levels[wi], spLevel:spFactor.levels[si], sspLevel:sspFactor.levels[ssi],
+            trtName:`${wpFactor.levels[wi]} / ${spFactor.levels[si]} / ${sspFactor.levels[ssi]}`,
+            wpColor:COLORS[wi], spColor:COLORS[si+wpFactor.levels.length],
+            sspColor:COLORS[ssi+wpFactor.levels.length+spFactor.levels.length],
+          });
+        });
+      });
+    });
+  }
+  return {plots};
+}
+function renderSplitSplitMap({plots}, wpFactor, spFactor, sspFactor, reps) {
+  const nWP = wpFactor.levels.length, nSP = spFactor.levels.length, nSSP = sspFactor.levels.length;
+  let html = `<div class="field-map-wrap">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">
+      <strong>${wpFactor.name}</strong> (whole) → <strong>${spFactor.name}</strong> (sub) → <strong>${sspFactor.name}</strong> (sub-sub)
+    </div>`;
+  for (let rep=0;rep<reps;rep++) {
+    html += `<div style="margin-bottom:14px;"><div class="map-label" style="font-size:11px;color:var(--text2);margin-bottom:4px;">Block ${rep+1}</div>
+      <div style="display:grid;grid-template-columns:repeat(${nWP},1fr);gap:4px;">`;
+    const wpOrder = [...new Set(plots.filter(p=>p.block===rep+1).map(p=>p.wpIdx))];
+    wpOrder.forEach(wi => {
+      html += `<div style="border:2px solid ${COLORS[wi]};border-radius:6px;overflow:hidden;">
+        <div style="background:${COLORS[wi]};color:white;font-size:10px;padding:3px 6px;">${wpFactor.levels[wi]}</div>`;
+      const spOrder = [...new Set(plots.filter(p=>p.block===rep+1&&p.wpIdx===wi).map(p=>p.spIdx))];
+      html += `<div style="display:grid;grid-template-columns:repeat(${nSP},1fr);gap:2px;padding:2px;">`;
+      spOrder.forEach(si => {
+        const color2 = COLORS[si+nWP];
+        html += `<div style="border:1px solid ${color2};border-radius:4px;overflow:hidden;">
+          <div style="background:${color2};color:white;font-size:9px;padding:2px 4px;">${spFactor.levels[si]}</div>
+          <div style="display:grid;grid-template-columns:repeat(${nSSP},1fr);gap:1px;padding:2px;">`;
+        const sspOrder = plots.filter(p=>p.block===rep+1&&p.wpIdx===wi&&p.spIdx===si);
+        sspOrder.forEach(p => {
+          html += `<div class="plot-cell" style="background:${p.sspColor};min-height:32px;font-size:9px;" title="${p.trtName}">
+            <span class="plot-trt">${abbreviate(p.sspLevel)}</span>
+          </div>`;
+        });
+        html += `</div></div>`;
+      });
+      html += `</div></div>`;
+    });
+    html += `</div></div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+function abbreviate(name) {
+  if (!name) return '';
+  return name.length > 8 ? name.substring(0,7)+'…' : name;
+}
+
+function readDesignFormValues() {
+  currentDesign.name = document.getElementById('d-name')?.value || currentDesign.name;
+  currentDesign.crop = document.getElementById('d-crop')?.value || currentDesign.crop;
+  currentDesign.field = document.getElementById('d-field')?.value || currentDesign.field;
+  currentDesign.season = document.getElementById('d-season')?.value || currentDesign.season;
+  currentDesign.objective = document.getElementById('d-objective')?.value || currentDesign.objective;
+  currentDesign.variable = document.getElementById('d-variable')?.value || currentDesign.variable;
+  const customVar = document.getElementById('d-variable-custom')?.value;
+  if (customVar && currentDesign.variable === 'Custom...') currentDesign.variable = customVar;
+  currentDesign.design = document.getElementById('d-design')?.value || currentDesign.design;
+  currentDesign.reps = parseInt(document.getElementById('d-reps')?.value || 4);
+  currentDesign.plotLen = parseInt(document.getElementById('d-plot-len')?.value || 600);
+  currentDesign.plotRows = parseInt(document.getElementById('d-plot-rows')?.value || 4);
+  currentDesign.wpFactor.name = document.getElementById('wp-factor-name')?.value || currentDesign.wpFactor.name;
+  currentDesign.spFactor.name = document.getElementById('sp-factor-name')?.value || currentDesign.spFactor.name;
+  currentDesign.sspFactor.name = document.getElementById('ssp-factor-name')?.value || currentDesign.sspFactor.name;
+  currentDesign.stripA.name = document.getElementById('strip-a-name')?.value || currentDesign.stripA.name;
+  currentDesign.stripB.name = document.getElementById('strip-b-name')?.value || currentDesign.stripB.name;
+}
+
+// ── SAVE TRIAL ────────────────────────────────────────────────
+function saveTrial() {
+  readDesignFormValues();
+  if (!currentDesign.name) { alert('Please enter a trial name.'); designStep(1); return; }
+  const trial = {
+    id: appState.nextTrialId++,
+    name: currentDesign.name,
+    crop: currentDesign.crop,
+    field: currentDesign.field,
+    season: currentDesign.season || appState.currentSeason,
+    objective: currentDesign.objective,
+    variable: currentDesign.variable,
+    design: currentDesign.design,
+    reps: currentDesign.reps,
+    plotLen: currentDesign.plotLen,
+    plotRows: currentDesign.plotRows,
+    treatments: currentDesign.treatments,
+    wpFactor: currentDesign.wpFactor,
+    spFactor: currentDesign.spFactor,
+    sspFactor: currentDesign.sspFactor,
+    stripA: currentDesign.stripA,
+    stripB: currentDesign.stripB,
+    plots: currentDesign.builtPlots || [],
+    gpsPlots: currentDesign.gpsPlots || [],
+    createdAt: new Date().toISOString(),
+  };
+  appState.trials.push(trial);
+  saveState();
+  currentCollectTrialId = trial.id;
+  currentAnalyzeTrialId = trial.id;
+  // Populate all page selectors with new trial
+  if (typeof populateAllSelectors === 'function') populateAllSelectors();
+  showPage('collect');
+  loadCollectTrial();
+}
+
+// ── GPS / LEAFLET — handled by gps-plots.js (loaded after app.js) ──
+let tileLayer = null;
+let leafletMap = null;
+// initLeafletMap() defined below in gps-plots section
+
+// ── DATA COLLECTION ───────────────────────────────────────────
+function populateCollectSelector() {
+  const sel = document.getElementById('collect-trial-select');
+  sel.innerHTML = '<option value="">— Select trial —</option>' +
+    appState.trials.map(t=>`<option value="${t.id}">${t.name} (${t.season})</option>`).join('');
+  if (currentCollectTrialId) {
+    sel.value = currentCollectTrialId;
+    loadCollectTrial();
+  }
+}
+
+function loadCollectTrial() {
+  const sel = document.getElementById('collect-trial-select');
+  const id = parseInt(sel.value);
+  if (!id) { document.getElementById('collect-content').style.display='none'; return; }
+  currentCollectTrialId = id;
+  const trial = appState.trials.find(t=>t.id===id);
+  if (!trial) return;
+  document.getElementById('collect-trial-name').textContent = `${trial.name} · ${trial.field||''} · ${trial.crop}`;
+  document.getElementById('collect-content').style.display='block';
+  document.getElementById('obs-var-label').textContent = trial.variable || 'Yield (bu/ac)';
+  updateCollectProgress(trial);
+  buildPlotGrid(trial);
+  populateObsPlotSelect(trial);
+  document.getElementById('obs-date').value = new Date().toISOString().split('T')[0];
+  setCollectTab('grid', document.querySelector('#page-collect .tab-btn'));
+}
+
+function updateCollectProgress(trial) {
+  const obs = appState.observations.filter(o=>o.trialId===trial.id);
+  const total = trial.plots?.length || 0;
+  const collected = obs.length;
+  const pct = total ? Math.round(collected/total*100) : 0;
+  document.getElementById('collect-progress-label').textContent = `${collected} of ${total} plots`;
+  document.getElementById('collect-pct-badge').textContent = `${pct}%`;
+  document.getElementById('collect-progress-fill').style.width = `${pct}%`;
+}
+
+function buildPlotGrid(trial) {
+  const grid = document.getElementById('plot-grid-container');
+  const obs = appState.observations.filter(o=>o.trialId===trial.id);
+  grid.innerHTML = (trial.plots||[]).map(p => {
+    const o = obs.find(ob=>ob.plotId===p.id);
+    const color = p.color || p.wpColor || '#3B6D11';
+    return `<div class="plot-card ${o?'collected':''}" onclick="selectPlotForEntry('${p.id}')">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <span style="font-size:12px;font-weight:500;font-family:var(--font-mono);">Plot ${p.id}</span>
+        <span style="font-size:14px;">${o?'✅':'⭕'}</span>
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:6px;display:flex;align-items:center;gap:4px;">
+        <span style="width:8px;height:8px;border-radius:2px;background:${color};display:inline-block;"></span>
+        ${p.trtName||'–'}${p.block?` · Blk ${p.block}`:''}
+      </div>
+      ${o ? `<div class="pc-val" style="font-size:18px;font-weight:500;">${parseFloat(o.value).toFixed(1)}</div>` : '<div style="font-size:12px;color:var(--text2);">Tap to enter</div>'}
+    </div>`;
+  }).join('');
+}
+
+function selectPlotForEntry(plotId) {
+  document.getElementById('obs-plot-select').value = plotId;
+  onObsPlotChange();
+  setCollectTab('enter', document.querySelectorAll('#page-collect .tab-btn')[1]);
+}
+
+function populateObsPlotSelect(trial) {
+  const sel = document.getElementById('obs-plot-select');
+  sel.innerHTML = (trial.plots||[]).map(p=>
+    `<option value="${p.id}">Plot ${p.id} – ${p.trtName}</option>`
+  ).join('');
+  onObsPlotChange();
+}
+
+function onObsPlotChange() {
+  const trial = appState.trials.find(t=>t.id===currentCollectTrialId);
+  if (!trial) return;
+  const plotId = document.getElementById('obs-plot-select').value;
+  const plot = trial.plots.find(p=>p.id===plotId);
+  const obs = appState.observations.find(o=>o.trialId===trial.id&&o.plotId===plotId);
+  const info = document.getElementById('obs-plot-info');
+  if (plot) {
+    info.style.display='block';
+    info.innerHTML = `<strong>${plot.trtName}</strong>${plot.block?` · Block ${plot.block}`:''}${plot.wpLevel?` · ${trial.wpFactor?.name}: ${plot.wpLevel}`:''}`;
+  }
+  if (obs) {
+    document.getElementById('obs-value').value = obs.value;
+    document.getElementById('obs-notes').value = obs.notes||'';
+    document.getElementById('obs-sec').value = obs.secondary||'';
+  } else {
+    document.getElementById('obs-value').value = '0';
+    document.getElementById('obs-notes').value = '';
+    document.getElementById('obs-sec').value = '';
+  }
+}
+
+function stepObs(delta) {
+  const inp = document.getElementById('obs-value');
+  inp.value = (parseFloat(inp.value||0) + delta).toFixed(1);
+}
+
+function saveObservation() {
+  const trial = appState.trials.find(t=>t.id===currentCollectTrialId);
+  if (!trial) return;
+  const plotId = document.getElementById('obs-plot-select').value;
+  const value = parseFloat(document.getElementById('obs-value').value);
+  const date = document.getElementById('obs-date').value;
+  const notes = document.getElementById('obs-notes').value;
+  const secondary = document.getElementById('obs-sec').value;
+  const quality = document.getElementById('obs-quality').value;
+  if (isNaN(value)) { alert('Enter a valid value.'); return; }
+  // Upsert
+  const existing = appState.observations.findIndex(o=>o.trialId===trial.id&&o.plotId===plotId);
+  const obs = { id: existing>=0 ? appState.observations[existing].id : appState.nextObsId++,
+    trialId:trial.id, plotId, value, date, notes, secondary, quality, savedAt:new Date().toISOString() };
+  if (existing>=0) appState.observations[existing]=obs; else appState.observations.push(obs);
+  saveState();
+  updateCollectProgress(trial);
+  buildPlotGrid(trial);
+}
+
+function saveAndNext() {
+  saveObservation();
+  const sel = document.getElementById('obs-plot-select');
+  const opts = sel.options;
+  const i = sel.selectedIndex;
+  if (i < opts.length-1) { sel.selectedIndex = i+1; onObsPlotChange(); }
+}
+
+function setCollectTab(tab, btn) {
+  ['grid','enter','review'].forEach(t=>{
+    document.getElementById('collect-'+t).style.display = t===tab?'block':'none';
+  });
+  document.querySelectorAll('#page-collect .tab-btn').forEach(b=>b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  if (tab==='review') buildReviewTable();
+}
+
+function buildReviewTable() {
+  const trial = appState.trials.find(t=>t.id===currentCollectTrialId);
+  const body = document.getElementById('review-body');
+  if (!trial) { body.innerHTML=''; return; }
+  const obs = appState.observations.filter(o=>o.trialId===trial.id);
+  body.innerHTML = obs.map(o => {
+    const plot = trial.plots?.find(p=>p.id===o.plotId);
+    return `<tr>
+      <td>${o.plotId}</td>
+      <td>${plot?.block||'–'}</td>
+      <td>${plot?.trtName||'–'}</td>
+      <td><strong>${parseFloat(o.value).toFixed(2)}</strong></td>
+      <td>${o.date||'–'}</td>
+      <td><button class="btn-icon" onclick="openEditObs(${o.id})">✏️</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px;">No observations yet</td></tr>';
+}
+
+function openEditObs(id) {
+  const obs = appState.observations.find(o=>o.id===id);
+  if (!obs) return;
+  editingObsId = id;
+  document.getElementById('edit-obs-val').value = obs.value;
+  document.getElementById('edit-obs-notes').value = obs.notes||'';
+  openModal('edit-obs-modal');
+}
+function saveEditObs() {
+  const obs = appState.observations.find(o=>o.id===editingObsId);
+  if (!obs) return;
+  obs.value = parseFloat(document.getElementById('edit-obs-val').value);
+  obs.notes = document.getElementById('edit-obs-notes').value;
+  saveState();
+  closeModal('edit-obs-modal');
+  buildReviewTable();
+}
+function deleteObsFromModal() {
+  if (!confirm('Delete this observation?')) return;
+  appState.observations = appState.observations.filter(o=>o.id!==editingObsId);
+  saveState();
+  closeModal('edit-obs-modal');
+  const trial = appState.trials.find(t=>t.id===currentCollectTrialId);
+  if (trial) { updateCollectProgress(trial); buildPlotGrid(trial); }
+  buildReviewTable();
+}
+
+// ── STATISTICAL ANALYSIS (PURE JS FALLBACK) ───────────────────
+// We implement ANOVA, Tukey HSD, and residual diagnostics in JS
+// WebR is loaded for enhanced R-based output when available.
+
+function mean(arr) { return arr.reduce((a,b)=>a+b,0)/arr.length; }
+function variance(arr) { const m=mean(arr); return arr.reduce((s,x)=>s+(x-m)**2,0)/(arr.length-1); }
+function sd(arr) { return Math.sqrt(variance(arr)); }
+
+function computeRCBD_ANOVA(data) {
+  // data: [{trt, block, value}]
+  const trts = [...new Set(data.map(d=>d.trt))];
+  const blocks = [...new Set(data.map(d=>d.block))];
+  const N = data.length, t = trts.length, b = blocks.length;
+  const grandMean = mean(data.map(d=>d.value));
+
+  const trtMeans = Object.fromEntries(trts.map(tr => [tr, mean(data.filter(d=>d.trt===tr).map(d=>d.value))]));
+  const blockMeans = Object.fromEntries(blocks.map(bl => [bl, mean(data.filter(d=>d.block===bl).map(d=>d.value))]));
+
+  const SS_total = data.reduce((s,d)=>s+(d.value-grandMean)**2,0);
+  const SS_trt = b * trts.reduce((s,tr)=>s+(trtMeans[tr]-grandMean)**2,0);
+  const SS_block = t * blocks.reduce((s,bl)=>s+(blockMeans[bl]-grandMean)**2,0);
+  const SS_error = SS_total - SS_trt - SS_block;
+
+  const df_trt = t-1, df_block = b-1, df_error = (t-1)*(b-1);
+  const MS_trt = SS_trt/df_trt, MS_block = SS_block/df_block, MS_error = SS_error/df_error;
+  const F_trt = MS_trt/MS_error, F_block = MS_block/MS_error;
+
+  // p-value approximation using F distribution (Wilson-Hilferty)
+  const pValueF = (F, df1, df2) => {
+    if (F <= 0) return 1;
+    const x = df2/(df2+df1*F);
+    return incompleteBeta(x, df2/2, df1/2);
+  };
+
+  const p_trt = pValueF(F_trt, df_trt, df_error);
+  const p_block = pValueF(F_block, df_block, df_error);
+
+  // Tukey HSD
+  const MSE = MS_error;
+  const r = b; // number of reps per treatment in RCBD
+  const trtStdErr = Math.sqrt(MSE/r);
+  const tukey = tukeyHSD(trtMeans, trts, MSE, r, df_error);
+
+  // Residuals
+  const residuals = data.map(d => ({ fitted: trtMeans[d.trt]+blockMeans[d.block]-grandMean, resid: d.value-(trtMeans[d.trt]+blockMeans[d.block]-grandMean) }));
+  const CV = (Math.sqrt(MSE)/grandMean*100).toFixed(1);
+
+  return { trts, trtMeans, blockMeans, grandMean, SS_trt, SS_block, SS_error, SS_total,
+    df_trt, df_block, df_error, MS_trt, MS_block, MS_error, F_trt, F_block,
+    p_trt, p_block, tukey, residuals, CV, MSE };
+}
+
+function computeCRD_ANOVA(data) {
+  const trts = [...new Set(data.map(d=>d.trt))];
+  const N = data.length, t = trts.length;
+  const grandMean = mean(data.map(d=>d.value));
+  const trtMeans = Object.fromEntries(trts.map(tr=>[tr,mean(data.filter(d=>d.trt===tr).map(d=>d.value))]));
+  const trtCounts = Object.fromEntries(trts.map(tr=>[tr,data.filter(d=>d.trt===tr).length]));
+  const SS_trt = trts.reduce((s,tr)=>s+trtCounts[tr]*(trtMeans[tr]-grandMean)**2,0);
+  const SS_error = data.reduce((s,d)=>s+(d.value-trtMeans[d.trt])**2,0);
+  const df_trt = t-1, df_error = N-t;
+  const MS_trt = SS_trt/df_trt, MS_error = SS_error/df_error;
+  const F_trt = MS_trt/MS_error;
+  const p_trt = incompleteBeta(df_error/(df_error+df_trt*F_trt), df_error/2, df_trt/2);
+  const r = N/t;
+  const tukey = tukeyHSD(trtMeans, trts, MS_error, r, df_error);
+  const residuals = data.map(d=>({fitted:trtMeans[d.trt], resid:d.value-trtMeans[d.trt]}));
+  const CV = (Math.sqrt(MS_error)/grandMean*100).toFixed(1);
+  return {trts,trtMeans,grandMean,SS_trt,SS_error,df_trt,df_error,MS_trt,MS_error,
+    F_trt,p_trt,tukey,residuals,CV,MSE:MS_error};
+}
+
+// Tukey HSD using Studentized Range Distribution approximation
+function tukeyHSD(trtMeans, trts, MSE, r, dfError) {
+  const k = trts.length;
+  // Critical q values table (α=0.05) indexed by [k][dfError]
+  const qCrit = criticalQ(k, dfError);
+  const HSD = qCrit * Math.sqrt(MSE/r);
+  // Sort treatments by mean descending
+  const sorted = [...trts].sort((a,b)=>trtMeans[b]-trtMeans[a]);
+  // Assign letters
+  const letters = {};
+  let letter = 0;
+  sorted.forEach(t => letters[t] = []);
+  const letterNames = 'ABCDEFGHIJ'.split('');
+  let groups = [];
+  for (let i=0;i<sorted.length;i++) {
+    let inGroup = false;
+    for (let g=groups.length-1;g>=0;g--) {
+      if (Math.abs(trtMeans[sorted[i]] - trtMeans[groups[g][0]]) <= HSD) {
+        groups[g].push(sorted[i]); inGroup=true; break;
+      }
+    }
+    if (!inGroup) groups.push([sorted[i]]);
+  }
+  // Assign letter labels
+  const assigned = {};
+  sorted.forEach(t => assigned[t]=[]);
+  groups.forEach((grp,gi) => {
+    grp.forEach(t => assigned[t].push(letterNames[gi]));
+  });
+  return { HSD, groups, letters: assigned, sorted };
+}
+
+function criticalQ(k, df) {
+  // Approximation table for α=0.05
+  const table = {
+    2:{1:17.97,2:6.08,3:4.50,4:3.93,5:3.64,6:3.46,7:3.34,8:3.26,9:3.20,10:3.15,12:3.08,20:2.95,30:2.89,60:2.83,120:2.80},
+    3:{1:26.98,2:8.33,3:5.91,4:5.04,5:4.65,6:4.34,7:4.16,8:4.04,9:3.95,10:3.88,12:3.77,20:3.58,30:3.49,60:3.40,120:3.36},
+    4:{1:32.82,2:9.80,3:6.82,4:5.76,5:5.22,6:4.90,7:4.68,8:4.53,9:4.41,10:4.33,12:4.20,20:3.96,30:3.85,60:3.74,120:3.69},
+    5:{1:37.08,2:10.88,3:7.50,4:6.29,5:5.67,6:5.30,7:5.06,8:4.89,9:4.76,10:4.65,12:4.51,20:4.23,30:4.10,60:3.98,120:3.92},
+    6:{1:40.41,2:11.74,3:8.04,4:6.71,5:6.03,6:5.63,7:5.36,8:5.17,9:5.02,10:4.91,12:4.75,20:4.45,30:4.30,60:4.16,120:4.10},
+    7:{1:43.12,2:12.44,3:8.48,4:7.05,5:6.33,6:5.90,7:5.61,8:5.40,9:5.24,10:5.12,12:4.95,20:4.62,30:4.46,60:4.31,120:4.24},
+    8:{1:45.40,2:13.03,3:8.85,4:7.35,5:6.58,6:6.12,7:5.82,8:5.60,9:5.43,10:5.30,12:5.12,20:4.77,30:4.60,60:4.44,120:4.36},
+  };
+  const row = table[Math.min(k,8)] || table[8];
+  const dfs = [1,2,3,4,5,6,7,8,9,10,12,20,30,60,120];
+  const dfCapped = Math.max(1, Math.min(df, 120));
+  let best = dfs[0];
+  dfs.forEach(d => { if (d <= dfCapped) best = d; });
+  return row[best] || 4.0;
+}
+
+// Regularized Incomplete Beta function (for p-values)
+function incompleteBeta(x, a, b) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const lbeta = lgamma(a) + lgamma(b) - lgamma(a+b);
+  const front = Math.exp(Math.log(x)*a + Math.log(1-x)*b - lbeta)/a;
+  return front * betaCF(x,a,b);
+}
+function lgamma(z) {
+  // Stirling approximation
+  if (z < 0.5) return Math.log(Math.PI/Math.sin(Math.PI*z)) - lgamma(1-z);
+  z--; let x=0.99999999999980993;
+  const c=[676.5203681218851,-1259.1392167224028,771.32342877765313,-176.61502916214059,12.507343278686905,-0.13857109526572012,9.9843695780195716e-6,1.5056327351493116e-7];
+  c.forEach((ci,i)=>x+=ci/(z+i+1));
+  const t=z+7.5;
+  return 0.5*Math.log(2*Math.PI)+(z+0.5)*Math.log(t)-t+Math.log(x);
+}
+function betaCF(x,a,b) {
+  let h=1,qab=a+b,qap=a+1,qam=a-1,c=1,d=1-qab*x/qap;
+  if(Math.abs(d)<1e-30)d=1e-30; d=1/d; h=d;
+  for(let m=1;m<=100;m++){
+    let m2=2*m, aa=m*(b-m)*x/((qam+m2)*(a+m2));
+    d=1+aa*d; if(Math.abs(d)<1e-30)d=1e-30;
+    c=1+aa/c; if(Math.abs(c)<1e-30)c=1e-30;
+    d=1/d; h*=d*c;
+    aa=-(a+m)*(qab+m)*x/((a+m2)*(qap+m2));
+    d=1+aa*d; if(Math.abs(d)<1e-30)d=1e-30;
+    c=1+aa/c; if(Math.abs(c)<1e-30)c=1e-30;
+    d=1/d; const del=d*c; h*=del;
+    if(Math.abs(del-1)<1e-10)break;
+  }
+  return h;
+}
+
+function pValueLabel(p) {
+  if (p < 0.001) return '***';
+  if (p < 0.01) return '**';
+  if (p < 0.05) return '*';
+  return 'ns';
+}
+
+// ── ANALYZE PAGE ──────────────────────────────────────────────
+function populateAnalyzeSelector() {
+  const sel = document.getElementById('analyze-trial-select');
+  sel.innerHTML = '<option value="">— Select trial —</option>' +
+    appState.trials.map(t=>`<option value="${t.id}">${t.name} (${t.season})</option>`).join('');
+  if (currentAnalyzeTrialId) { sel.value = currentAnalyzeTrialId; loadAnalysisTrial(); }
+  initWebR();
+}
+
+function loadAnalysisTrial() {
+  const id = parseInt(document.getElementById('analyze-trial-select').value);
+  if (!id) return;
+  currentAnalyzeTrialId = id;
+  const trial = appState.trials.find(t=>t.id===id);
+  if (!trial) return;
+  document.getElementById('analyze-trial-name').textContent = `${trial.name} · ${trial.variable}`;
+}
+
+async function initWebR() {
+  // Attempt to load WebR; gracefully fall back to JS stats if unavailable
+  const statusEl = document.getElementById('webr-status');
+  try {
+    const { WebR } = await import('https://webr.r-wasm.org/v0.4.0/webr.mjs');
+    webrR = new WebR();
+    await webrR.init();
+    webrReady = true;
+    statusEl.innerHTML = '<span style="color:var(--green-600);">✅ R engine ready (WebR)</span>';
+    setTimeout(()=>statusEl.style.display='none', 2000);
+  } catch(e) {
+    statusEl.innerHTML = '<span style="color:var(--amber-800);">⚡ Using built-in statistics engine</span>';
+    setTimeout(()=>statusEl.style.display='none', 2000);
+  }
+}
+
+async function runAnalysis() {
+  const id = currentAnalyzeTrialId;
+  if (!id) { alert('Select a trial first.'); return; }
+  const trial = appState.trials.find(t=>t.id===id);
+  if (!trial) return;
+
+  const obs = appState.observations.filter(o=>o.trialId===id);
+  if (obs.length < 3) { alert('Need at least 3 observations to run analysis.'); return; }
+
+  document.getElementById('analyze-content').style.display='block';
+
+  // Build data frame
+  let data = [];
+  if (trial.design === 'rcbd' || trial.design === 'latin') {
+    obs.forEach(o => {
+      const plot = trial.plots?.find(p=>p.id===o.plotId);
+      if (plot) data.push({ trt:plot.trtName, block:String(plot.block||plot.row||1), value:parseFloat(o.value) });
+    });
+  } else {
+    obs.forEach(o => {
+      const plot = trial.plots?.find(p=>p.id===o.plotId);
+      if (plot) data.push({ trt:plot.trtName, block:String(plot.block||1), value:parseFloat(o.value) });
+    });
+  }
+
+  let result;
+  if (webrReady && webrR) {
+    result = await runRAnalysis(webrR, data, trial.design);
+  } else {
+    result = trial.design==='crd' ? computeCRD_ANOVA(data) : computeRCBD_ANOVA(data);
+  }
+
+  analysisResult = { trial, result, data };
+  renderAnalysis(trial, result, data);
+}
+
+async function runRAnalysis(R, data, design) {
+  try {
+    const trtStr = data.map(d=>`"${d.trt}"`).join(',');
+    const blockStr = data.map(d=>`"${d.block}"`).join(',');
+    const valStr = data.map(d=>d.value).join(',');
+    const rCode = `
+      tryCatch({
+        df <- data.frame(
+          trt = factor(c(${trtStr})),
+          block = factor(c(${blockStr})),
+          value = c(${valStr})
+        )
+        ${design==='crd'
+          ? 'model <- aov(value ~ trt, data=df)'
+          : 'model <- aov(value ~ trt + block, data=df)'}
+        av <- summary(model)[[1]]
+        resid <- residuals(model)
+        fitted <- fitted(model)
+        # Tukey HSD
+        tk <- TukeyHSD(model, "trt")$trt
+        list(
+          fTrt = av["trt","F value"],
+          pTrt = av["trt","Pr(>F)"],
+          msTrt = av["trt","Mean Sq"],
+          msError = av["Residuals","Mean Sq"],
+          ssTrt = av["trt","Sum Sq"],
+          ssError = av["Residuals","Sum Sq"],
+          dfTrt = av["trt","Df"],
+          dfError = av["Residuals","Df"],
+          resid = as.numeric(resid),
+          fitted = as.numeric(fitted),
+          tukeyDiff = tk[,"diff"],
+          tukeyLwr = tk[,"lwr"],
+          tukeyUpr = tk[,"upr"],
+          tukeyP = tk[,"p adj"],
+          tukeyRownames = rownames(tk),
+          grandMean = mean(df$value),
+          CV = sd(df$value)/mean(df$value)*100
+        )
+      }, error = function(e) list(error=conditionMessage(e)))
+    `;
+    const res = await R.evalR(rCode);
+    const obj = await res.toJs({depth:2});
+    if (obj.error) throw new Error(obj.error);
+    // Convert to our standard format and merge with JS result for compatibility
+    const jsFallback = computeRCBD_ANOVA(data);
+    return {
+      ...jsFallback,
+      F_trt: obj.fTrt?.values?.[0] || jsFallback.F_trt,
+      p_trt: obj.pTrt?.values?.[0] || jsFallback.p_trt,
+      MS_error: obj.msError?.values?.[0] || jsFallback.MS_error,
+      grandMean: obj.grandMean?.values?.[0] || jsFallback.grandMean,
+      CV: obj.CV?.values?.[0]?.toFixed(1) || jsFallback.CV,
+      residuals: (obj.resid?.values||[]).map((r,i)=>({resid:r, fitted:(obj.fitted?.values||[])[i]||0})),
+      source: 'WebR/R',
+    };
+  } catch(e) {
+    console.warn('WebR analysis failed, using JS fallback:', e);
+    return computeRCBD_ANOVA(data);
+  }
+}
+
+function renderAnalysis(trial, result, data) {
+  const gm = result.grandMean || mean(data.map(d=>d.value));
+  const {F_trt, p_trt, CV, trts, trtMeans, tukey} = result;
+
+  // Metrics
+  document.getElementById('analyze-metrics').innerHTML = `
+    <div class="metric-card"><div class="metric-label">Grand mean</div><div class="metric-value">${gm.toFixed(1)}<span class="metric-unit"> ${trial.variable?.split('(')[1]?.replace(')','') || 'units'}</span></div></div>
+    <div class="metric-card"><div class="metric-label">CV (%)</div><div class="metric-value">${parseFloat(CV||0).toFixed(1)}</div></div>
+    <div class="metric-card"><div class="metric-label">F-statistic</div><div class="metric-value">${parseFloat(F_trt||0).toFixed(2)}</div></div>
+    <div class="metric-card"><div class="metric-label">p-value</div><div class="metric-value" style="color:${p_trt<0.05?'var(--green-600)':'var(--text2)'};">${parseFloat(p_trt||1).toFixed(4)}</div></div>
+  `;
+
+  // Insight box
+  const insight = document.getElementById('analyze-insight');
+  insight.style.display='block';
+  const sig = p_trt < 0.05;
+  const bestTrt = tukey?.sorted?.[0] || trts?.[0];
+  insight.innerHTML = sig
+    ? `✅ <strong>Statistically significant treatment effect</strong> (p = ${parseFloat(p_trt).toFixed(4)}). <strong>${bestTrt}</strong> produced the highest mean. Tukey HSD grouping below — treatments sharing a letter are not significantly different (α = 0.05). CV = ${CV}% indicates ${parseFloat(CV)<15?'good experimental precision':'moderate variability — consider field design adjustments next season'}.`
+    : `⚠️ <strong>No statistically significant treatment effect</strong> (p = ${parseFloat(p_trt).toFixed(4)}). The observed differences may be due to field variability rather than treatment effects. Consider increasing replication or plot size in future trials.`;
+
+  renderMeansBars(trial, result);
+  renderMeansTable(trial, result, data);
+  renderANOVATable(trial, result);
+  renderResidualChart(result);
+  calcEcon();
+  renderReport(trial, result, data);
+}
+
+function renderMeansBars(trial, result) {
+  const {tukey, trtMeans, trts} = result;
+  const sorted = tukey?.sorted || trts;
+  const maxMean = Math.max(...sorted.map(t=>trtMeans[t]));
+  const colors = trial.treatments?.reduce((m,t)=>({...m,[t.name]:t.color}),{}) || {};
+
+  document.getElementById('means-bars').innerHTML = sorted.map(trt => {
+    const m = trtMeans[trt];
+    const pct = (m/maxMean*85).toFixed(1);
+    const color = colors[trt] || COLORS[sorted.indexOf(trt)%COLORS.length];
+    const letters = tukey?.letters?.[trt]?.join('') || '';
+    return `<div class="bar-chart-row">
+      <span class="bar-label">${trt}</span>
+      <div class="bar-track">
+        <div class="bar-fill" style="width:${pct}%;background:${color};">
+          <span class="bar-val">${m.toFixed(1)}</span>
+        </div>
+      </div>
+      <span class="bar-sig">${letters}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderMeansTable(trial, result, data) {
+  const {tukey, trtMeans, trts} = result;
+  const sorted = tukey?.sorted || trts;
+  const table = document.getElementById('means-table');
+  table.querySelector('thead').innerHTML = `<tr><th>Treatment</th><th>n</th><th>Mean</th><th>Std Dev</th><th>Tukey group</th></tr>`;
+  table.querySelector('tbody').innerHTML = sorted.map(trt => {
+    const vals = data.filter(d=>d.trt===trt).map(d=>d.value);
+    const m = mean(vals), s = vals.length>1?sd(vals):0;
+    const letters = tukey?.letters?.[trt]?.join('') || '–';
+    const colors = trial.treatments?.reduce((m,t)=>({...m,[t.name]:t.color}),{}) || {};
+    const color = colors[trt] || '#3B6D11';
+    return `<tr>
+      <td><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:6px;"></span>${trt}</td>
+      <td>${vals.length}</td>
+      <td><strong>${m.toFixed(2)}</strong></td>
+      <td>±${s.toFixed(2)}</td>
+      <td><span class="badge badge-green">${letters}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderANOVATable(trial, result) {
+  const {SS_trt,SS_block,SS_error,df_trt,df_block,df_error,MS_trt,MS_block,MS_error,F_trt,F_block,p_trt,p_block} = result;
+  const table = document.getElementById('anova-table');
+  const rows = [];
+  if (SS_block !== undefined && trial.design !== 'crd') {
+    rows.push({src:'Block', df:df_block, ss:SS_block, ms:MS_block, F:F_block, p:p_block});
+  }
+  rows.push({src:'Treatment', df:df_trt, ss:SS_trt, ms:MS_trt, F:F_trt, p:p_trt});
+  rows.push({src:'Residual', df:df_error, ss:SS_error, ms:MS_error, F:null, p:null});
+  rows.push({src:'Total', df:(df_block||0)+df_trt+df_error, ss:(SS_block||0)+SS_trt+SS_error, ms:null,F:null,p:null});
+
+  table.querySelector('thead').innerHTML = `<tr><th>Source</th><th>df</th><th>SS</th><th>MS</th><th>F</th><th>Pr(&gt;F)</th></tr>`;
+  table.querySelector('tbody').innerHTML = rows.map(r => {
+    const sigClass = r.p !== null ? (r.p<0.05?'class="anova-sig"':'class="anova-ns"') : '';
+    return `<tr>
+      <td><strong>${r.src}</strong></td>
+      <td>${r.df??'–'}</td>
+      <td>${r.ss!=null?r.ss.toFixed(2):'–'}</td>
+      <td>${r.ms!=null?r.ms.toFixed(2):'–'}</td>
+      <td>${r.F!=null?r.F.toFixed(3):'–'}</td>
+      <td ${sigClass}>${r.p!=null?`${r.p.toFixed(4)} ${pValueLabel(r.p)}`:'–'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderResidualChart(result) {
+  const {residuals} = result;
+  if (!residuals?.length) return;
+  const ctx = document.getElementById('resid-chart');
+  if (!ctx) return;
+  if (residChart) residChart.destroy();
+  residChart = new Chart(ctx, {
+    type: 'scatter',
+    data: { datasets: [{
+      label:'Residuals',
+      data: residuals.map(r=>({x:parseFloat(r.fitted.toFixed(3)),y:parseFloat(r.resid.toFixed(3))})),
+      backgroundColor:'rgba(59,109,17,0.6)',
+      pointRadius:5,
+    }]},
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{title:{display:true,text:'Fitted values'},grid:{color:'rgba(128,128,128,0.1)'}},
+        y:{title:{display:true,text:'Residuals'},grid:{color:'rgba(128,128,128,0.1)'}},
+      }
+    }
+  });
+}
+
+function setAnalyzeTab(tab, btn) {
+  ['means','anova','econ','report'].forEach(t=>{
+    const el = document.getElementById('atab-'+t);
+    if (el) el.style.display = t===tab?'block':'none';
+  });
+  document.querySelectorAll('#page-analyze .tab-btn').forEach(b=>b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+}
+
+function calcEcon() {
+  if (!analysisResult) return;
+  const {trial, result, data} = analysisResult;
+  const price = parseFloat(document.getElementById('econ-price')?.value||4.5);
+  const inputCost = parseFloat(document.getElementById('econ-cost')?.value||0.45);
+  const {trtMeans, tukey} = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const trts = trial.treatments || [];
+  const getTrtObj = name => trts.find(t=>t.name===name);
+  const controlMean = trtMeans[sorted[sorted.length-1]] || Object.values(trtMeans)[0];
+
+  let bestNet = -Infinity, bestTrt='';
+  const tbody = document.getElementById('econ-body');
+  if (!tbody) return;
+  tbody.innerHTML = sorted.map(trt => {
+    const m = trtMeans[trt];
+    const tObj = getTrtObj(trt);
+    const rate = tObj?.numericRate || 0;
+    const gross = m * price;
+    const cost = rate * inputCost;
+    const net = gross - cost;
+    const vs = net - (controlMean * price);
+    if (net > bestNet) { bestNet=net; bestTrt=trt; }
+    const color = vs>0?'var(--green-600)':'var(--coral-600)';
+    return `<tr>
+      <td>${trt}</td>
+      <td>${m.toFixed(1)}</td>
+      <td>$${gross.toFixed(0)}</td>
+      <td>$${cost.toFixed(0)}</td>
+      <td><strong>$${net.toFixed(0)}</strong></td>
+      <td style="color:${color};">${vs>=0?'+':''}$${vs.toFixed(0)}</td>
+    </tr>`;
+  }).join('');
+
+  const rec = document.getElementById('econ-rec');
+  if (rec) {
+    rec.style.display='block';
+    rec.innerHTML = `💡 At current prices, <strong>${bestTrt}</strong> returns the highest net revenue. Adjust prices above to model different market scenarios.`;
+  }
+}
+
+function renderReport(trial, result, data) {
+  // Handled by js/reports.js renderFullReportTab — called from extensions.js
+  const el = document.getElementById('report-preview');
+  if (!el) return;
+  const {trtMeans, tukey, p_trt, F_trt, CV} = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const gm = mean(data.map(d=>d.value));
+  el.innerHTML = `
+    <div class="report-section">
+      <h3>Trial information</h3>
+      <table class="data-table">
+        <tr><td style="color:var(--text2);width:140px;">Trial name</td><td><strong>${trial.name}</strong></td></tr>
+        <tr><td style="color:var(--text2);">Crop</td><td>${trial.crop}</td></tr>
+        <tr><td style="color:var(--text2);">Field</td><td>${trial.field||'–'}</td></tr>
+        <tr><td style="color:var(--text2);">Season</td><td>${trial.season}</td></tr>
+        <tr><td style="color:var(--text2);">Design</td><td>${trial.design?.toUpperCase()}</td></tr>
+        <tr><td style="color:var(--text2);">Objective</td><td>${trial.objective||'–'}</td></tr>
+        <tr><td style="color:var(--text2);">Variable</td><td>${trial.variable}</td></tr>
+        <tr><td style="color:var(--text2);">Observations</td><td>${data.length}</td></tr>
+      </table>
+    </div>
+    <div class="report-section">
+      <h3>Statistical summary</h3>
+      <table class="data-table">
+        <tr><td style="color:var(--text2);width:140px;">Grand mean</td><td>${gm.toFixed(2)}</td></tr>
+        <tr><td style="color:var(--text2);">CV (%)</td><td>${parseFloat(CV||0).toFixed(1)}%</td></tr>
+        <tr><td style="color:var(--text2);">F-statistic (Trt)</td><td>${parseFloat(F_trt||0).toFixed(3)}</td></tr>
+        <tr><td style="color:var(--text2);">p-value (Trt)</td><td style="color:${p_trt<0.05?'var(--green-600)':'var(--text)'};">${parseFloat(p_trt||1).toFixed(4)} ${pValueLabel(p_trt)}</td></tr>
+        <tr><td style="color:var(--text2);">Tukey LSD</td><td>${result.tukey?.HSD?.toFixed(2)||'–'}</td></tr>
+      </table>
+    </div>
+    <div class="report-section">
+      <h3>Treatment means</h3>
+      <table class="data-table">
+        <thead><tr><th>Rank</th><th>Treatment</th><th>Mean</th><th>Group</th></tr></thead>
+        <tbody>
+        ${sorted.map((trt,i) => {
+          const vals = data.filter(d=>d.trt===trt).map(d=>d.value);
+          const m = mean(vals);
+          const letters = tukey?.letters?.[trt]?.join('')||'–';
+          return `<tr><td>${i+1}</td><td>${trt}</td><td>${m.toFixed(2)}</td><td>${letters}</td></tr>`;
+        }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="report-section">
+      <h3>Interpretation</h3>
+      <p style="font-size:13px;line-height:1.7;color:var(--text2);">
+        ${p_trt<0.05
+          ? `The ${trial.design?.toUpperCase()} analysis revealed a statistically significant treatment effect (F = ${parseFloat(F_trt||0).toFixed(2)}, p = ${parseFloat(p_trt||1).toFixed(4)}). The top-performing treatment was <strong>${sorted[0]}</strong> with a mean of ${trtMeans[sorted[0]]?.toFixed(2)} ${trial.variable?.split('(')[1]?.replace(')','') || 'units'}. The CV of ${parseFloat(CV||0).toFixed(1)}% indicates ${parseFloat(CV||20)<15?'good':'moderate'} experimental precision.`
+          : `The ${trial.design?.toUpperCase()} analysis did not detect a statistically significant treatment effect (F = ${parseFloat(F_trt||0).toFixed(2)}, p = ${parseFloat(p_trt||1).toFixed(4)}). Observed differences among treatment means are likely attributable to field variability. Consider increasing replication in future trials.`}
+      </p>
+    </div>
+  `;
+}
+
+// ── EXPORT ────────────────────────────────────────────────────
+function exportCSV() {
+  const trial = appState.trials.find(t=>t.id===(currentCollectTrialId||currentAnalyzeTrialId));
+  if (!trial) { alert('No trial selected.'); return; }
+  const obs = appState.observations.filter(o=>o.trialId===trial.id);
+  const rows = obs.map(o => {
+    const plot = trial.plots?.find(p=>p.id===o.plotId) || {};
+    return {
+      trial_id: trial.id, trial_name: trial.name, season: trial.season,
+      crop: trial.crop, field: trial.field, design: trial.design,
+      plot_id: o.plotId, block: plot.block||'', treatment: plot.trtName||'',
+      value: o.value, variable: trial.variable, date: o.date,
+      secondary: o.secondary||'', notes: o.notes||''
+    };
+  });
+  const csv = Papa.unparse(rows);
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download=`${trial.name.replace(/\s+/g,'_')}_${trial.season}.csv`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function exportPDF() {
+  if (!analysisResult) { alert('Run analysis first.'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  const { trial, result, data } = analysisResult;
+  const {trtMeans, tukey, p_trt, F_trt, CV} = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const gm = mean(data.map(d=>d.value));
+
+  // Header
+  doc.setFillColor(59,109,17);
+  doc.rect(0,0,210,18,'F');
+  doc.setTextColor(255,255,255);
+  doc.setFontSize(14); doc.setFont(undefined,'bold');
+  doc.text('FarmPRISM – Trial Analysis Report', 14, 12);
+  doc.setTextColor(0,0,0);
+
+  // Trial info
+  doc.setFontSize(12); doc.setFont(undefined,'bold');
+  doc.text(trial.name, 14, 28);
+  doc.setFontSize(9); doc.setFont(undefined,'normal');
+  doc.setTextColor(100,100,100);
+  doc.text(`${trial.crop} · ${trial.field||'No field'} · Season ${trial.season} · Design: ${trial.design?.toUpperCase()}`, 14, 35);
+  doc.setTextColor(0,0,0);
+
+  // Key stats
+  doc.setFontSize(10); doc.setFont(undefined,'bold');
+  doc.text('Statistical Results', 14, 48);
+  doc.setFont(undefined,'normal'); doc.setFontSize(9);
+  const stats = [
+    ['Grand mean:', `${gm.toFixed(2)} ${trial.variable||''}`],
+    ['CV:', `${parseFloat(CV||0).toFixed(1)}%`],
+    ['F-statistic (Treatment):', `${parseFloat(F_trt||0).toFixed(3)}`],
+    ['p-value:', `${parseFloat(p_trt||1).toFixed(4)} ${pValueLabel(p_trt)}`],
+    ['Tukey HSD:', `${result.tukey?.HSD?.toFixed(2)||'–'}`],
+  ];
+  stats.forEach(([k,v],i) => {
+    doc.setTextColor(100,100,100); doc.text(k, 14, 56+i*7);
+    doc.setTextColor(0,0,0); doc.text(v, 70, 56+i*7);
+  });
+
+  // Means table
+  doc.setFontSize(10); doc.setFont(undefined,'bold');
+  doc.text('Treatment Means (Tukey HSD Grouping)', 14, 100);
+  doc.setFont(undefined,'normal'); doc.setFontSize(9);
+  doc.setFillColor(240,243,235);
+  doc.rect(14,104,182,6,'F');
+  doc.setFont(undefined,'bold');
+  ['Rank','Treatment','n','Mean','Std Dev','Group'].forEach((h,i)=>{
+    doc.text(h, [14,30,80,110,135,162][i], 108);
+  });
+  doc.setFont(undefined,'normal');
+  sorted.forEach((trt,i) => {
+    const vals = data.filter(d=>d.trt===trt).map(d=>d.value);
+    const m = mean(vals); const s = vals.length>1?sd(vals):0;
+    const y = 118+i*7;
+    if (i%2===0){doc.setFillColor(250,251,248);doc.rect(14,y-4,182,7,'F');}
+    doc.text(String(i+1), 14, y);
+    doc.text(trt.substring(0,25), 30, y);
+    doc.text(String(vals.length), 80, y);
+    doc.text(m.toFixed(2), 110, y);
+    doc.text(`±${s.toFixed(2)}`, 135, y);
+    doc.text(tukey?.letters?.[trt]?.join('')||'–', 162, y);
+  });
+
+  // Interpretation
+  const startY = 120 + sorted.length*7;
+  doc.setFontSize(10); doc.setFont(undefined,'bold');
+  doc.text('Interpretation', 14, startY+4);
+  doc.setFont(undefined,'normal'); doc.setFontSize(9);
+  const interpretation = p_trt<0.05
+    ? `Statistically significant treatment effect detected (F=${parseFloat(F_trt||0).toFixed(2)}, p=${parseFloat(p_trt||1).toFixed(4)}). Best treatment: ${sorted[0]} with mean ${trtMeans[sorted[0]]?.toFixed(2)}.`
+    : `No significant treatment effect (p=${parseFloat(p_trt||1).toFixed(4)}). Observed differences likely due to field variability.`;
+  doc.text(doc.splitTextToSize(interpretation, 182), 14, startY+12);
+
+  // Footer
+  doc.setFontSize(8); doc.setTextColor(150,150,150);
+  doc.text(`Generated by FarmPRISM · ${new Date().toLocaleDateString()}`, 14, 285);
+
+  doc.save(`${trial.name.replace(/\s+/g,'_')}_report.pdf`);
+}
+
+// ── SEASON COMPARISON ─────────────────────────────────────────
+function buildSeasonComparison() {
+  // Populate filters
+  const nameFilter = document.getElementById('season-trial-filter');
+  const uniqueNames = [...new Set(appState.trials.map(t=>t.name))];
+  nameFilter.innerHTML = '<option value="">— All trials —</option>' +
+    uniqueNames.map(n=>`<option value="${n}">${n}</option>`).join('');
+
+  const allTrials = appState.trials;
+  const body = document.getElementById('season-body');
+  const datasets = [];
+  const labels = [...new Set(allTrials.map(t=>t.season))].sort();
+
+  allTrials.forEach((trial,ti) => {
+    const obs = appState.observations.filter(o=>o.trialId===trial.id);
+    if (!obs.length) return;
+    const data = obs.map(o => {
+      const plot = trial.plots?.find(p=>p.id===o.plotId);
+      return { trt: plot?.trtName||'Unknown', block:String(plot?.block||1), value:parseFloat(o.value) };
+    });
+    const result = trial.design==='crd' ? computeCRD_ANOVA(data) : computeRCBD_ANOVA(data);
+    const {trtMeans, tukey, p_trt} = result;
+    const sorted = tukey?.sorted || Object.keys(trtMeans);
+    const bestTrt = sorted[0];
+    const controlMean = trtMeans[sorted[sorted.length-1]] || Object.values(trtMeans)[0];
+    const bestMean = trtMeans[bestTrt];
+    const pctGain = ((bestMean-controlMean)/controlMean*100).toFixed(1);
+    body && (body.innerHTML += `<tr>
+      <td>${trial.season}</td>
+      <td>${trial.name}</td>
+      <td>${bestTrt}</td>
+      <td>${bestMean?.toFixed(2)||'–'}</td>
+      <td style="color:var(--green-600);">+${pctGain}%</td>
+      <td class="${p_trt<0.05?'anova-sig':'anova-ns'}">${parseFloat(p_trt||1).toFixed(4)} ${pValueLabel(p_trt)}</td>
+    </tr>`);
+    datasets.push({ label:`${trial.name} (${trial.season})`, data:[{x:trial.season,y:bestMean}], backgroundColor:COLORS[ti%COLORS.length], borderColor:COLORS[ti%COLORS.length], borderWidth:2 });
+  });
+
+  // Season chart
+  const ctx = document.getElementById('season-chart');
+  if (!ctx) return;
+  if (seasonChart) seasonChart.destroy();
+  seasonChart = new Chart(ctx, {
+    type:'bar',
+    data:{ labels, datasets },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{position:'bottom',labels:{boxWidth:10,font:{size:11}}}},
+      scales:{
+        x:{title:{display:true,text:'Season'}},
+        y:{title:{display:true,text:'Mean yield (best treatment)'},beginAtZero:false},
+      }
+    }
+  });
+}
+
+// ── MODALS ────────────────────────────────────────────────────
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+// Close modal on overlay click
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', e => { if (e.target===el) el.classList.remove('open'); });
+});
+
+// ── INIT ──────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  loadState();
+  updateOnlineStatus();
+  renderTrialsPage();
+  const seasonLabel = document.getElementById('current-season-label');
+  if (seasonLabel) seasonLabel.textContent = appState.currentSeason;
+  if (!appState.trials.length) loadDemoData();
+  checkForSharedTrial();
+  setTimeout(populateAllSelectors, 300);
+});
+
+function loadDemoData() {
+  // Pre-load a sample completed trial for demonstration
+  const trial = {
+    id: appState.nextTrialId++,
+    name: 'Nitrogen Rate Study',
+    crop: 'Corn', field: 'North 40', season: '2025',
+    objective: 'Determine optimal N rate for yield',
+    variable: 'Grain yield (bu/ac)', design: 'rcbd', reps: 4,
+    plotLen: 600, plotRows: 4,
+    treatments: [
+      {name:'Control (0 lb)',  rate:'0 lb/ac',   color:COLORS[0], numericRate:0},
+      {name:'Low N (120 lb)',  rate:'120 lb/ac',  color:COLORS[1], numericRate:120},
+      {name:'Std N (180 lb)',  rate:'180 lb/ac',  color:COLORS[2], numericRate:180},
+      {name:'High N (240 lb)', rate:'240 lb/ac',  color:COLORS[3], numericRate:240},
+    ],
+    plots: [], gpsPlots:[], createdAt: new Date().toISOString(),
+  };
+  // Build plots
+  const trtNames = trial.treatments.map(t=>t.name);
+  for (let r=0;r<4;r++) {
+    const order = shuffle(trtNames.map((_,i)=>i));
+    order.forEach((ti,pos)=>{
+      trial.plots.push({id:`${r+1}${String(pos+1).padStart(2,'0')}`, block:r+1, trtIdx:ti, trtName:trtNames[ti], color:trial.treatments[ti].color});
+    });
+  }
+  appState.trials.push(trial);
+
+  // Obs data (realistic values with block effects)
+  const blockEffect = [3.2,-1.8,0.4,-1.8];
+  const trtEffect = [0, 17.5, 23.1, 24.6];
+  const baseMean = 160;
+  trial.plots.forEach(p => {
+    const val = baseMean + blockEffect[p.block-1] + trtEffect[p.trtIdx] + (Math.random()-0.5)*8;
+    appState.observations.push({
+      id:appState.nextObsId++, trialId:trial.id, plotId:p.id,
+      value:parseFloat(val.toFixed(1)), date:'2025-10-15', notes:'', secondary:'14.5',
+      savedAt:new Date().toISOString(),
+    });
+  });
+
+  // Second season trial
+  const trial2 = {...trial, id:appState.nextTrialId++, season:'2024', name:'Nitrogen Rate Study', createdAt:'2024-01-01T00:00:00Z'};
+  trial2.plots = JSON.parse(JSON.stringify(trial.plots));
+  appState.trials.push(trial2);
+  trial2.plots.forEach(p => {
+    const val = baseMean - 8 + blockEffect[p.block-1]*0.8 + trtEffect[p.trtIdx]*0.9 + (Math.random()-0.5)*9;
+    appState.observations.push({
+      id:appState.nextObsId++, trialId:trial2.id, plotId:p.id,
+      value:parseFloat(val.toFixed(1)), date:'2024-10-12', notes:'', secondary:'15.1',
+      savedAt:new Date().toISOString(),
+    });
+  });
+
+  appState.currentSeason = '2025';
+  saveState();
+  renderTrialsPage();
+}
+
+
+// ===== weather.js =====
+// ============================================================
+// WEATHER MODULE — Open-Meteo API (free, no key required)
+// Fetches GDDs, rainfall, temperature for a trial location
+// ============================================================
+
+const BASE_TEMP_F = 50; // GDD base temp for corn (°F)
+const BASE_TEMP_C = 10; // GDD base temp (°C)
+
+// Fetch weather for a lat/lng and date range
+async function fetchTrialWeather(lat, lng, startDate, endDate) {
+  if (!lat || !lng) throw new Error('No GPS coordinates for this trial');
+  const url = `https://archive-api.open-meteo.com/v1/archive?` +
+    `latitude=${lat}&longitude=${lng}` +
+    `&start_date=${startDate}&end_date=${endDate}` +
+    `&daily=temperature_2m_max,temperature_2m_min,precipitation_sum` +
+    `&temperature_unit=fahrenheit&precipitation_unit=inch&timezone=auto`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Weather API unavailable');
+  return res.json();
+}
+
+// Also fetch current/forecast for ongoing trials
+async function fetchCurrentWeather(lat, lng) {
+  const url = `https://api.open-meteo.com/v1/forecast?` +
+    `latitude=${lat}&longitude=${lng}` +
+    `&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,et0_fao_evapotranspiration` +
+    `&hourly=relative_humidity_2m,soil_temperature_0cm,soil_moisture_0_to_1cm` +
+    `&temperature_unit=fahrenheit&precipitation_unit=inch&timezone=auto&forecast_days=7`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Weather forecast unavailable');
+  return res.json();
+}
+
+function calcGDDs(data, baseTemp = BASE_TEMP_F) {
+  const { temperature_2m_max: tmax, temperature_2m_min: tmin, time } = data.daily;
+  let cumGDD = 0;
+  return time.map((date, i) => {
+    const avg = (Math.min(tmax[i], 86) + Math.max(tmin[i], baseTemp)) / 2;
+    const gdd = Math.max(0, avg - baseTemp);
+    cumGDD += gdd;
+    return {
+      date,
+      tmax: tmax[i],
+      tmin: tmin[i],
+      precip: data.daily.precipitation_sum[i],
+      gdd: parseFloat(gdd.toFixed(1)),
+      cumGDD: parseFloat(cumGDD.toFixed(1)),
+    };
+  });
+}
+
+function summarizeWeather(dailyData) {
+  const totalGDD = dailyData[dailyData.length - 1]?.cumGDD || 0;
+  const totalPrecip = dailyData.reduce((s, d) => s + (d.precip || 0), 0);
+  const avgTmax = dailyData.reduce((s, d) => s + d.tmax, 0) / dailyData.length;
+  const avgTmin = dailyData.reduce((s, d) => s + d.tmin, 0) / dailyData.length;
+  const dryDays = dailyData.filter(d => d.precip < 0.1).length;
+  const wetDays = dailyData.filter(d => d.precip >= 0.1).length;
+  return {
+    totalGDD: parseFloat(totalGDD.toFixed(0)),
+    totalPrecip: parseFloat(totalPrecip.toFixed(2)),
+    avgTmax: parseFloat(avgTmax.toFixed(1)),
+    avgTmin: parseFloat(avgTmin.toFixed(1)),
+    dryDays,
+    wetDays,
+    days: dailyData.length,
+  };
+}
+
+// Render weather panel into a container element
+function renderWeatherPanel(containerId, weatherData, summary, forecast) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="section-divider">Season weather summary</div>
+    <div class="metric-grid" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-bottom:16px;">
+      <div class="metric-card"><div class="metric-label">Total GDDs</div><div class="metric-value">${summary.totalGDD}<span class="metric-unit"> °F</span></div></div>
+      <div class="metric-card"><div class="metric-label">Total precip</div><div class="metric-value">${summary.totalPrecip}<span class="metric-unit"> in</span></div></div>
+      <div class="metric-card"><div class="metric-label">Avg high</div><div class="metric-value">${summary.avgTmax}<span class="metric-unit"> °F</span></div></div>
+      <div class="metric-card"><div class="metric-label">Avg low</div><div class="metric-value">${summary.avgTmin}<span class="metric-unit"> °F</span></div></div>
+      <div class="metric-card"><div class="metric-label">Rainy days</div><div class="metric-value">${summary.wetDays}</div></div>
+      <div class="metric-card"><div class="metric-label">Dry days</div><div class="metric-value">${summary.dryDays}</div></div>
+    </div>
+
+    <div class="section-divider">Growing degree days accumulation</div>
+    <div style="position:relative;height:200px;margin-bottom:16px;">
+      <canvas id="gdd-chart" role="img" aria-label="GDD accumulation chart">Cumulative growing degree days over the season.</canvas>
+    </div>
+
+    <div class="section-divider">Precipitation</div>
+    <div style="position:relative;height:160px;margin-bottom:16px;">
+      <canvas id="precip-chart" role="img" aria-label="Daily precipitation chart">Daily precipitation totals.</canvas>
+    </div>
+
+    ${forecast ? renderForecastStrip(forecast) : ''}
+  `;
+
+  renderGDDChart(weatherData);
+  renderPrecipChart(weatherData);
+}
+
+function renderForecastStrip(forecast) {
+  const days = forecast.daily.time.slice(0, 7);
+  const tmax = forecast.daily.temperature_2m_max;
+  const tmin = forecast.daily.temperature_2m_min;
+  const precip = forecast.daily.precipitation_sum;
+  return `
+    <div class="section-divider">7-day forecast</div>
+    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-bottom:16px;">
+      ${days.map((d, i) => {
+        const dow = new Date(d).toLocaleDateString('en', {weekday:'short'});
+        const precipIcon = precip[i] > 0.1 ? '🌧️' : precip[i] > 0 ? '🌦️' : '☀️';
+        return `<div style="background:var(--surface2);border-radius:var(--radius-sm);padding:8px 4px;text-align:center;">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">${dow}</div>
+          <div style="font-size:16px;margin-bottom:4px;">${precipIcon}</div>
+          <div style="font-size:12px;font-weight:500;">${Math.round(tmax[i])}°</div>
+          <div style="font-size:11px;color:var(--text2);">${Math.round(tmin[i])}°</div>
+          ${precip[i] > 0 ? `<div style="font-size:10px;color:var(--blue-600);margin-top:2px;">${precip[i].toFixed(2)}"</div>` : ''}
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+let gddChartInst = null, precipChartInst = null;
+
+function renderGDDChart(dailyData) {
+  const ctx = document.getElementById('gdd-chart');
+  if (!ctx) return;
+  if (gddChartInst) gddChartInst.destroy();
+  // Sample every 3rd day for readability
+  const sampled = dailyData.filter((_, i) => i % 3 === 0 || i === dailyData.length - 1);
+  gddChartInst = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: sampled.map(d => d.date.slice(5)),
+      datasets: [{
+        label: 'Cumulative GDDs',
+        data: sampled.map(d => d.cumGDD),
+        borderColor: '#3B6D11',
+        backgroundColor: 'rgba(59,109,17,0.1)',
+        fill: true,
+        tension: 0.4,
+        pointRadius: 2,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { font: { size: 10 }, maxTicksLimit: 8 }, grid: { color: 'rgba(128,128,128,0.1)' } },
+        y: { title: { display: true, text: 'GDDs (°F base 50)', font: { size: 10 } }, grid: { color: 'rgba(128,128,128,0.1)' } }
+      }
+    }
+  });
+}
+
+function renderPrecipChart(dailyData) {
+  const ctx = document.getElementById('precip-chart');
+  if (!ctx) return;
+  if (precipChartInst) precipChartInst.destroy();
+  const sampled = dailyData.filter((_, i) => i % 2 === 0 || i === dailyData.length - 1);
+  precipChartInst = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: sampled.map(d => d.date.slice(5)),
+      datasets: [{
+        label: 'Precipitation (in)',
+        data: sampled.map(d => d.precip),
+        backgroundColor: '#185FA5',
+        borderRadius: 2,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { font: { size: 10 }, maxTicksLimit: 8 }, grid: { display: false } },
+        y: { title: { display: true, text: 'Inches', font: { size: 10 } }, grid: { color: 'rgba(128,128,128,0.1)' } }
+      }
+    }
+  });
+}
+
+// Geocode a field name/location to lat/lng using Nominatim
+async function geocodeLocation(locationName) {
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(locationName)}&format=json&limit=1`;
+  const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+  const data = await res.json();
+  if (!data.length) throw new Error('Location not found');
+  return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), displayName: data[0].display_name };
+}
+
+
+// ===== yield-import.js =====
+// ============================================================
+// YIELD MONITOR IMPORT MODULE
+// Supports: John Deere, Case IH, Ag Leader, generic CSV
+// Matches imported data to trial plots by GPS or treatment order
+// ============================================================
+
+// Detect which monitor format based on column headers
+function detectMonitorFormat(headers) {
+  const h = headers.map(s => s.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  if (h.some(c => c.includes('moistpct') || c.includes('yieldmass'))) return 'deere';
+  if (h.some(c => c.includes('wetmass') || c.includes('distance'))) return 'agleader';
+  if (h.some(c => c.includes('yld_vol_dr') || c.includes('speed_mph'))) return 'case';
+  return 'generic';
+}
+
+// Column mappings for each monitor type
+const FORMAT_MAP = {
+  deere: {
+    lat: ['latitude', 'lat'],
+    lng: ['longitude', 'lon', 'lng'],
+    yield: ['yielddrybushelsperacre', 'yield(drybushel/acre)', 'yieldmassperarea'],
+    moisture: ['moistpct', 'moisture', 'grainmoisture'],
+    speed: ['vehiclespeedmph', 'speed(mph)'],
+  },
+  agleader: {
+    lat: ['latitude', 'lat'],
+    lng: ['longitude', 'lon'],
+    yield: ['yieldbu/ac', 'yield', 'dryyield'],
+    moisture: ['moisture', 'grainmoisture%'],
+    speed: ['speed', 'vehiclespeed'],
+  },
+  case: {
+    lat: ['latitude', 'lat'],
+    lng: ['longitude', 'lng', 'lon'],
+    yield: ['yld_vol_dry', 'dryyield', 'yield'],
+    moisture: ['moisture', 'grain_moisture'],
+    speed: ['speed_mph', 'speed'],
+  },
+  generic: {
+    lat: ['lat', 'latitude', 'y'],
+    lng: ['lon', 'lng', 'longitude', 'x'],
+    yield: ['yield', 'dryyield', 'bu_ac', 'bushels'],
+    moisture: ['moisture', 'moist', 'moisture_pct'],
+    speed: ['speed', 'mph'],
+  }
+};
+
+function findColumn(headers, candidates) {
+  const normalized = headers.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  for (const cand of candidates) {
+    const idx = normalized.findIndex(h => h.includes(cand.replace(/[^a-z0-9]/g, '')));
+    if (idx >= 0) return headers[idx];
+  }
+  return null;
+}
+
+// Parse yield monitor CSV file
+function parseYieldMonitorCSV(csvText) {
+  const result = Papa.parse(csvText, {
+    header: true,
+    skipEmptyLines: true,
+    dynamicTyping: true,
+  });
+  if (result.errors.length && !result.data.length) {
+    throw new Error('Could not parse CSV: ' + result.errors[0].message);
+  }
+  const headers = result.meta.fields || [];
+  const format = detectMonitorFormat(headers);
+  const map = FORMAT_MAP[format];
+
+  const latCol = findColumn(headers, map.lat);
+  const lngCol = findColumn(headers, map.lng);
+  const yieldCol = findColumn(headers, map.yield);
+  const moistCol = findColumn(headers, map.moisture);
+  const speedCol = findColumn(headers, map.speed);
+
+  if (!yieldCol) throw new Error('Could not find yield column. Found columns: ' + headers.join(', '));
+
+  const points = result.data
+    .filter(row => {
+      const y = parseFloat(row[yieldCol]);
+      return y > 0 && y < 500; // Filter obvious errors
+    })
+    .map(row => ({
+      lat: latCol ? parseFloat(row[latCol]) : null,
+      lng: lngCol ? parseFloat(row[lngCol]) : null,
+      yield: parseFloat(row[yieldCol]),
+      moisture: moistCol ? parseFloat(row[moistCol]) : null,
+      speed: speedCol ? parseFloat(row[speedCol]) : null,
+    }))
+    .filter(p => !isNaN(p.yield));
+
+  return { points, format, headers, yieldCol, latCol, lngCol, moistCol };
+}
+
+// Match yield points to trial plots using GPS boundaries or sequential order
+function matchPointsToPlots(points, plots, gpsPlots) {
+  const results = {};
+
+  if (gpsPlots && gpsPlots.length > 0 && points[0]?.lat) {
+    // GPS matching: assign each point to nearest plot center
+    plots.forEach(plot => {
+      const gps = gpsPlots.find(g => g.plotId === plot.id);
+      if (!gps) return;
+      const plotPoints = points.filter(p => {
+        if (!p.lat || !p.lng) return false;
+        const dist = haversineDistance(p.lat, p.lng, gps.lat, gps.lng);
+        return dist < 200; // within 200 meters
+      });
+      if (plotPoints.length > 0) {
+        // Remove outliers (>2 SD from mean)
+        const yields = plotPoints.map(p => p.yield);
+        const m = yields.reduce((a, b) => a + b, 0) / yields.length;
+        const sd = Math.sqrt(yields.reduce((s, y) => s + (y - m) ** 2, 0) / yields.length);
+        const filtered = plotPoints.filter(p => Math.abs(p.yield - m) <= 2 * sd);
+        const avgYield = filtered.reduce((s, p) => s + p.yield, 0) / filtered.length;
+        const avgMoist = filtered.filter(p => p.moisture).length
+          ? filtered.reduce((s, p) => s + (p.moisture || 0), 0) / filtered.length : null;
+        results[plot.id] = {
+          yield: parseFloat(avgYield.toFixed(2)),
+          moisture: avgMoist ? parseFloat(avgMoist.toFixed(1)) : null,
+          pointCount: filtered.length,
+          method: 'gps',
+        };
+      }
+    });
+  } else {
+    // No GPS: divide points evenly by plot order (strip harvesting assumption)
+    const chunkSize = Math.floor(points.length / plots.length);
+    plots.forEach((plot, i) => {
+      const chunk = points.slice(i * chunkSize, (i + 1) * chunkSize);
+      if (!chunk.length) return;
+      const yields = chunk.map(p => p.yield);
+      const m = yields.reduce((a, b) => a + b, 0) / yields.length;
+      const sd = Math.sqrt(yields.reduce((s, y) => s + (y - m) ** 2, 0) / yields.length);
+      const filtered = chunk.filter(p => Math.abs(p.yield - m) <= 2 * sd);
+      const avgYield = filtered.reduce((s, p) => s + p.yield, 0) / filtered.length;
+      results[plot.id] = {
+        yield: parseFloat(avgYield.toFixed(2)),
+        moisture: null,
+        pointCount: filtered.length,
+        method: 'sequential',
+      };
+    });
+  }
+
+  return results;
+}
+
+function haversineDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Render import UI
+function renderImportPanel(containerId, trial, onImportComplete) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title"><span class="cicon">📥</span> Import yield monitor data</div>
+      <div class="info-box blue" style="margin-bottom:12px;">
+        Supports John Deere Operations Center, Ag Leader SMS, Case IH AFS, and generic CSV exports.
+        Yield values will be automatically matched to your trial plots.
+      </div>
+      <div id="import-dropzone" style="
+        border:2px dashed var(--text3);border-radius:var(--radius);
+        padding:32px;text-align:center;cursor:pointer;transition:all 0.15s;
+        background:var(--surface2);
+      " onclick="document.getElementById('yield-file-input').click()"
+         ondragover="event.preventDefault();this.style.borderColor='var(--green-600)'"
+         ondragleave="this.style.borderColor='var(--text3)'"
+         ondrop="handleYieldDrop(event,'${trial.id}')">
+        <div style="font-size:32px;margin-bottom:8px;">📊</div>
+        <div style="font-size:14px;font-weight:500;margin-bottom:4px;">Drop yield monitor CSV here</div>
+        <div style="font-size:12px;color:var(--text2);">or click to browse · John Deere, Ag Leader, Case IH, generic CSV</div>
+      </div>
+      <input type="file" id="yield-file-input" accept=".csv,.txt" style="display:none"
+        onchange="handleYieldFile(event,'${trial.id}')">
+      <div id="import-status" style="margin-top:12px;"></div>
+      <div id="import-preview" style="margin-top:12px;"></div>
+    </div>
+  `;
+}
+
+function handleYieldDrop(event, trialId) {
+  event.preventDefault();
+  document.getElementById('import-dropzone').style.borderColor = 'var(--text3)';
+  const file = event.dataTransfer.files[0];
+  if (file) processYieldFile(file, parseInt(trialId));
+}
+
+function handleYieldFile(event, trialId) {
+  const file = event.target.files[0];
+  if (file) processYieldFile(file, parseInt(trialId));
+}
+
+function processYieldFile(file, trialId) {
+  const status = document.getElementById('import-status');
+  status.innerHTML = `<div class="info-box blue">⏳ Reading file...</div>`;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const trial = appState.trials.find(t => t.id === trialId);
+      if (!trial) throw new Error('Trial not found');
+      const { points, format } = parseYieldMonitorCSV(e.target.result);
+      const matched = matchPointsToPlots(points, trial.plots || [], trial.gpsPlots || []);
+      const matchCount = Object.keys(matched).length;
+
+      status.innerHTML = `<div class="info-box green">
+        ✅ Detected format: <strong>${format}</strong> · ${points.length.toLocaleString()} data points read · ${matchCount} plots matched
+        ${matched[Object.keys(matched)[0]]?.method === 'sequential' ? '<br>⚠️ No GPS data found — matched by sequential plot order. Verify plot assignments below.' : ''}
+      </div>`;
+
+      renderImportPreview(matched, trial);
+    } catch (err) {
+      status.innerHTML = `<div class="info-box" style="background:var(--red-50);color:var(--red-600);">❌ ${err.message}</div>`;
+    }
+  };
+  reader.readAsText(file);
+}
+
+function renderImportPreview(matched, trial) {
+  const preview = document.getElementById('import-preview');
+  const rows = (trial.plots || []).map(p => {
+    const m = matched[p.id];
+    return `<tr>
+      <td>${p.id}</td>
+      <td>${p.trtName}</td>
+      <td>${p.block || '–'}</td>
+      <td>${m ? `<strong>${m.yield}</strong> bu/ac` : '<span style="color:var(--text3);">No data</span>'}</td>
+      <td>${m?.moisture ? `${m.moisture}%` : '–'}</td>
+      <td>${m?.pointCount || '–'}</td>
+    </tr>`;
+  }).join('');
+
+  preview.innerHTML = `
+    <div style="overflow-x:auto;">
+      <table class="data-table">
+        <thead><tr><th>Plot</th><th>Treatment</th><th>Block</th><th>Avg yield</th><th>Moisture</th><th>Points</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="btn-row" style="margin-top:12px;">
+      <button class="btn btn-primary" onclick="applyYieldImport(${JSON.stringify(matched).replace(/"/g,'&quot;')}, ${trial.id})">
+        ✅ Apply to trial observations
+      </button>
+      <button class="btn btn-secondary" onclick="document.getElementById('import-preview').innerHTML=''">Cancel</button>
+    </div>
+  `;
+}
+
+function applyYieldImport(matched, trialId) {
+  const trial = appState.trials.find(t => t.id === trialId);
+  if (!trial) return;
+  const today = new Date().toISOString().split('T')[0];
+  let count = 0;
+  Object.entries(matched).forEach(([plotId, data]) => {
+    if (!data.yield) return;
+    const existing = appState.observations.findIndex(o => o.trialId === trialId && o.plotId === plotId);
+    const obs = {
+      id: existing >= 0 ? appState.observations[existing].id : appState.nextObsId++,
+      trialId, plotId,
+      value: data.yield,
+      secondary: data.moisture || '',
+      date: today,
+      notes: `Imported from yield monitor (${data.pointCount} points, ${data.method} match)`,
+      savedAt: new Date().toISOString(),
+      source: 'yield_monitor',
+    };
+    if (existing >= 0) appState.observations[existing] = obs;
+    else appState.observations.push(obs);
+    count++;
+  });
+  saveState();
+  document.getElementById('import-status').innerHTML = `<div class="info-box green">✅ ${count} plot observations saved successfully.</div>`;
+  document.getElementById('import-preview').innerHTML = '';
+  if (typeof updateCollectProgress === 'function') updateCollectProgress(trial);
+  if (typeof buildPlotGrid === 'function') buildPlotGrid(trial);
+}
+
+
+// ===== features.js =====
+// ============================================================
+// POWER ANALYSIS — Sample size calculator for field trials
+// ============================================================
+
+// Calculate required replications to detect a given effect size
+// Uses t-test approximation with iterative refinement
+function calcRequiredReps(delta, sigma, alpha = 0.05, power = 0.80) {
+  // delta: minimum detectable difference (same units as yield)
+  // sigma: expected standard deviation (from CV or prior trials)
+  // Returns required number of replications
+  const zAlpha = qnorm(1 - alpha / 2); // two-tailed
+  const zBeta = qnorm(power);
+  const n = Math.ceil(2 * ((zAlpha + zBeta) ** 2) * (sigma ** 2) / (delta ** 2));
+  return Math.max(2, n);
+}
+
+// Calculate detectable difference given reps
+function calcDetectableDiff(reps, sigma, alpha = 0.05, power = 0.80) {
+  const zAlpha = qnorm(1 - alpha / 2);
+  const zBeta = qnorm(power);
+  return Math.sqrt(2 * ((zAlpha + zBeta) ** 2) * (sigma ** 2) / reps);
+}
+
+// Normal quantile function (inverse CDF)
+function qnorm(p) {
+  if (p <= 0) return -Infinity;
+  if (p >= 1) return Infinity;
+  if (p === 0.5) return 0;
+  const a = [
+    -3.969683028665376e+01, 2.209460984245205e+02,
+    -2.759285104469687e+02, 1.383577518672690e+02,
+    -3.066479806614716e+01, 2.506628277459239e+00
+  ];
+  const b = [
+    -5.447609879822406e+01, 1.615858368580409e+02,
+    -1.556989798598866e+02, 6.680131188771972e+01,
+    -1.328068155288572e+01
+  ];
+  const c = [
+    -7.784894002430293e-03, -3.223964580411365e-01,
+    -2.400758277161838e+00, -2.549732539343734e+00,
+    4.374664141464968e+00, 2.938163982698783e+00
+  ];
+  const d = [
+    7.784695709041462e-03, 3.224671290700398e-01,
+    2.445134137142996e+00, 3.754408661907416e+00
+  ];
+  const pLow = 0.02425, pHigh = 1 - pLow;
+  let q;
+  if (p < pLow) {
+    const t = Math.sqrt(-2 * Math.log(p));
+    q = (((((c[0]*t+c[1])*t+c[2])*t+c[3])*t+c[4])*t+c[5]) /
+        ((((d[0]*t+d[1])*t+d[2])*t+d[3])*t+1);
+  } else if (p <= pHigh) {
+    const u = p - 0.5, t = u * u;
+    q = (((((a[0]*t+a[1])*t+a[2])*t+a[3])*t+a[4])*t+a[5])*u /
+        (((((b[0]*t+b[1])*t+b[2])*t+b[3])*t+b[4])*t+1);
+  } else {
+    const t = Math.sqrt(-2 * Math.log(1 - p));
+    q = -(((((c[0]*t+c[1])*t+c[2])*t+c[3])*t+c[4])*t+c[5]) /
+         ((((d[0]*t+d[1])*t+d[2])*t+d[3])*t+1);
+  }
+  return q;
+}
+
+function renderPowerAnalysis(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title"><span class="cicon">⚡</span> Power analysis — how many replications do I need?</div>
+      <div class="info-box blue" style="margin-bottom:14px;">
+        Enter your expected field variability and the smallest yield difference you care about detecting.
+        The calculator tells you how many replications to plan for.
+      </div>
+      <div class="form-row col2">
+        <div class="form-group">
+          <label class="form-label">Expected CV (%) <span style="color:var(--text3);font-weight:400;">from prior trials or extension data</span></label>
+          <input type="number" id="pa-cv" value="12" step="1" min="1" max="50" oninput="updatePowerAnalysis()">
+          <span class="form-hint">Corn grain yield typically 8–15%, soybeans 10–18%</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Expected mean yield (bu/ac)</label>
+          <input type="number" id="pa-mean" value="180" step="5" oninput="updatePowerAnalysis()">
+        </div>
+      </div>
+      <div class="form-row col2">
+        <div class="form-group">
+          <label class="form-label">Minimum detectable difference (bu/ac)</label>
+          <input type="number" id="pa-delta" value="15" step="1" min="1" oninput="updatePowerAnalysis()">
+          <span class="form-hint">The smallest yield difference that would change your management decision</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Desired statistical power</label>
+          <select id="pa-power" oninput="updatePowerAnalysis()">
+            <option value="0.70">70% (minimum)</option>
+            <option value="0.80" selected>80% (standard)</option>
+            <option value="0.90">90% (high)</option>
+            <option value="0.95">95% (very high)</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="power-result" style="margin-top:12px;"></div>
+
+      <div class="section-divider" style="margin-top:16px;">Detectable difference by replications</div>
+      <div style="position:relative;height:200px;">
+        <canvas id="power-chart" role="img" aria-label="Power analysis chart showing detectable difference vs replications">Power analysis curve.</canvas>
+      </div>
+    </div>
+  `;
+  updatePowerAnalysis();
+}
+
+let powerChartInst = null;
+function updatePowerAnalysis() {
+  const cv = parseFloat(document.getElementById('pa-cv')?.value || 12);
+  const mu = parseFloat(document.getElementById('pa-mean')?.value || 180);
+  const delta = parseFloat(document.getElementById('pa-delta')?.value || 15);
+  const power = parseFloat(document.getElementById('pa-power')?.value || 0.80);
+  const sigma = (cv / 100) * mu;
+  const n = calcRequiredReps(delta, sigma, 0.05, power);
+
+  const resultEl = document.getElementById('power-result');
+  if (resultEl) {
+    const color = n <= 4 ? 'var(--green-600)' : n <= 6 ? 'var(--amber-400)' : 'var(--coral-600)';
+    const interpretation = n <= 4
+      ? 'Achievable with a standard on-farm trial layout.'
+      : n <= 6
+      ? 'Feasible but requires careful field selection to fit all plots.'
+      : 'Consider increasing the minimum detectable difference, or accept lower power.';
+    resultEl.innerHTML = `
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div style="background:var(--surface2);border-radius:var(--radius);padding:16px 24px;text-align:center;">
+          <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">Replications needed</div>
+          <div style="font-size:40px;font-weight:500;color:${color};">${n}</div>
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:13px;margin-bottom:6px;">
+            To detect a <strong>${delta} bu/ac</strong> difference with <strong>${Math.round(power*100)}% power</strong> at CV = ${cv}%:
+          </div>
+          <div style="font-size:13px;color:var(--text2);">${interpretation}</div>
+          <div style="font-size:12px;color:var(--text2);margin-top:6px;">
+            σ = ${sigma.toFixed(1)} bu/ac · LSD ≈ ${(delta * 0.7).toFixed(1)} bu/ac at α = 0.05
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Power curve chart
+  const ctx = document.getElementById('power-chart');
+  if (!ctx) return;
+  if (powerChartInst) powerChartInst.destroy();
+  const repsRange = [2, 3, 4, 5, 6, 7, 8, 10, 12];
+  const diffs = repsRange.map(r => parseFloat(calcDetectableDiff(r, sigma, 0.05, power).toFixed(1)));
+  powerChartInst = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: repsRange.map(r => `${r} reps`),
+      datasets: [{
+        label: 'Detectable difference (bu/ac)',
+        data: diffs,
+        borderColor: '#3B6D11',
+        backgroundColor: 'rgba(59,109,17,0.1)',
+        fill: true,
+        tension: 0.4,
+        pointRadius: 4,
+      }, {
+        label: 'Your target',
+        data: repsRange.map(() => delta),
+        borderColor: '#BA7517',
+        borderDash: [6, 4],
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: false,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } }
+      },
+      scales: {
+        x: { grid: { color: 'rgba(128,128,128,0.1)' } },
+        y: {
+          title: { display: true, text: 'Min detectable diff (bu/ac)', font: { size: 10 } },
+          grid: { color: 'rgba(128,128,128,0.1)' }
+        }
+      }
+    }
+  });
+}
+
+// ============================================================
+// OUTLIER FLAGGING
+// ============================================================
+
+function detectOutliers(observations, plots) {
+  // Group by treatment
+  const byTrt = {};
+  observations.forEach(o => {
+    const plot = plots.find(p => p.id === o.plotId);
+    if (!plot) return;
+    const trt = plot.trtName;
+    if (!byTrt[trt]) byTrt[trt] = [];
+    byTrt[trt].push({ obs: o, plot });
+  });
+
+  const flagged = [];
+  Object.entries(byTrt).forEach(([trt, entries]) => {
+    if (entries.length < 3) return;
+    const vals = entries.map(e => parseFloat(e.obs.value));
+    const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const sd = Math.sqrt(vals.reduce((s, v) => s + (v - m) ** 2, 0) / (vals.length - 1));
+    entries.forEach(({ obs, plot }) => {
+      const z = Math.abs((parseFloat(obs.value) - m) / sd);
+      if (z > 2.0) {
+        flagged.push({
+          obsId: obs.id, plotId: plot.id, trt,
+          value: parseFloat(obs.value),
+          mean: parseFloat(m.toFixed(2)),
+          sd: parseFloat(sd.toFixed(2)),
+          zScore: parseFloat(z.toFixed(2)),
+          direction: parseFloat(obs.value) > m ? 'high' : 'low',
+        });
+      }
+    });
+  });
+  return flagged;
+}
+
+function renderOutlierPanel(containerId, outliers, onResolve) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  if (!outliers.length) {
+    el.innerHTML = `<div class="info-box green">✅ No statistical outliers detected (all values within 2 SD of treatment mean).</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="info-box amber">
+      ⚠️ <strong>${outliers.length} potential outlier${outliers.length > 1 ? 's' : ''} detected</strong> —
+      values more than 2 standard deviations from their treatment mean.
+      Review each and decide whether to keep, flag, or remove.
+    </div>
+    ${outliers.map(o => `
+      <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;margin-bottom:8px;border:1px solid var(--amber-100);">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+          <div>
+            <strong>Plot ${o.plotId}</strong> · ${o.trt}
+            <span class="badge ${o.direction==='high'?'badge-coral':'badge-blue'}" style="margin-left:8px;">
+              ${o.direction === 'high' ? '↑ Unusually high' : '↓ Unusually low'}
+            </span>
+          </div>
+          <div style="font-family:var(--font-mono);font-size:13px;">
+            Value: <strong>${o.value}</strong> · Mean: ${o.mean} · SD: ${o.sd} · Z: ${o.zScore}
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label class="form-label">What happened in this plot?</label>
+          <input type="text" id="outlier-note-${o.obsId}" placeholder="e.g. Equipment issue, wet spot, deer damage, combine error..." style="font-size:13px;">
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-secondary" style="font-size:12px;" onclick="resolveOutlier(${o.obsId},'keep')">Keep as-is</button>
+          <button class="btn btn-secondary" style="font-size:12px;" onclick="resolveOutlier(${o.obsId},'flag')">Flag but keep</button>
+          <button class="btn btn-danger" style="font-size:12px;" onclick="resolveOutlier(${o.obsId},'remove')">Remove from analysis</button>
+        </div>
+      </div>
+    `).join('')}
+  `;
+}
+
+function resolveOutlier(obsId, action) {
+  const note = document.getElementById(`outlier-note-${obsId}`)?.value || '';
+  const obs = appState.observations.find(o => o.id === obsId);
+  if (!obs) return;
+  if (action === 'remove') {
+    obs.excluded = true;
+    obs.excludeReason = note || 'Statistical outlier — removed by user';
+  } else if (action === 'flag') {
+    obs.flagged = true;
+    obs.flagNote = note || 'Statistical outlier — flagged for review';
+  } else {
+    obs.excluded = false;
+    obs.flagged = false;
+  }
+  obs.outlierNote = note;
+  saveState();
+  // Re-render the row
+  const row = document.getElementById(`outlier-note-${obsId}`)?.closest('div[style]');
+  if (row) row.style.opacity = '0.5';
+}
+
+// ============================================================
+// PHOTO CAPTURE
+// ============================================================
+
+function renderPhotoCaptureButton(plotId, containerId) {
+  return `
+    <button class="btn btn-secondary" style="font-size:12px;" onclick="openPhotoCapture('${plotId}','${containerId}')">
+      📷 Add photo
+    </button>
+  `;
+}
+
+function openPhotoCapture(plotId, returnContainer) {
+  // Try camera first, fall back to file picker
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.capture = 'environment'; // rear camera on mobile
+  input.onchange = e => handlePhotoCapture(e, plotId);
+  input.click();
+}
+
+function handlePhotoCapture(event, plotId) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const base64 = e.target.result;
+    // Get GPS if available
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        pos => savePhoto(plotId, base64, pos.coords.latitude, pos.coords.longitude),
+        () => savePhoto(plotId, base64, null, null)
+      );
+    } else {
+      savePhoto(plotId, base64, null, null);
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+function savePhoto(plotId, base64, lat, lng) {
+  if (!appState.photos) appState.photos = [];
+  appState.photos.push({
+    id: Date.now(),
+    plotId,
+    trialId: currentCollectTrialId,
+    base64,
+    lat, lng,
+    takenAt: new Date().toISOString(),
+    note: '',
+  });
+  saveState();
+  renderPlotPhotos(plotId);
+}
+
+function renderPlotPhotos(plotId) {
+  const container = document.getElementById(`photos-${plotId}`);
+  if (!container) return;
+  const photos = (appState.photos || []).filter(p => p.plotId === plotId);
+  container.innerHTML = photos.map(p => `
+    <div style="position:relative;display:inline-block;margin:4px;">
+      <img src="${p.base64}" style="width:80px;height:60px;object-fit:cover;border-radius:6px;border:var(--border);" alt="Plot photo">
+      ${p.lat ? `<div style="position:absolute;bottom:2px;left:2px;background:rgba(0,0,0,0.6);color:white;font-size:8px;padding:1px 3px;border-radius:2px;">📍</div>` : ''}
+      <button onclick="deletePhoto(${p.id})" style="position:absolute;top:2px;right:2px;background:rgba(0,0,0,0.6);color:white;border:none;border-radius:50%;width:16px;height:16px;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;">×</button>
+    </div>
+  `).join('');
+}
+
+function deletePhoto(photoId) {
+  if (!confirm('Delete this photo?')) return;
+  appState.photos = (appState.photos || []).filter(p => p.id !== photoId);
+  saveState();
+}
+
+// ============================================================
+// SHARING — Read-only trial link generation
+// ============================================================
+
+function generateShareLink(trialId) {
+  const trial = appState.trials.find(t => t.id === trialId);
+  if (!trial) return null;
+  const obs = appState.observations.filter(o => o.trialId === trialId);
+  const shareData = {
+    trial,
+    observations: obs,
+    sharedAt: new Date().toISOString(),
+    version: 1,
+  };
+  // Encode as base64 URL parameter
+  const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(shareData))));
+  const url = `${window.location.origin}${window.location.pathname}?shared=${encoded}`;
+  return url;
+}
+
+function checkForSharedTrial() {
+  const params = new URLSearchParams(window.location.search);
+  const shared = params.get('shared');
+  if (!shared) return false;
+  try {
+    const data = JSON.parse(decodeURIComponent(escape(atob(shared))));
+    renderSharedTrialView(data);
+    return true;
+  } catch (e) {
+    console.warn('Invalid shared trial data');
+    return false;
+  }
+}
+
+function renderSharedTrialView(data) {
+  // Inject a read-only banner and load the trial data temporarily
+  const banner = document.createElement('div');
+  banner.style.cssText = 'background:var(--blue-50);color:var(--blue-800);padding:10px 16px;font-size:13px;text-align:center;border-bottom:1px solid var(--blue-100);';
+  banner.innerHTML = `👁️ <strong>Read-only view</strong> — ${data.trial.name} shared by a colleague · <a href="${window.location.pathname}" style="color:var(--blue-600);">Open your own trials</a>`;
+  document.body.insertBefore(banner, document.body.firstChild);
+
+  // Temporarily add to state for viewing (won't be saved)
+  const tempId = 99999;
+  data.trial.id = tempId;
+  data.trial.readOnly = true;
+  data.observations.forEach(o => { o.trialId = tempId; });
+  appState.trials.unshift(data.trial);
+  appState.observations.push(...data.observations);
+
+  currentAnalyzeTrialId = tempId;
+  showPage('analyze');
+  document.getElementById('analyze-trial-select').value = tempId;
+  loadAnalysisTrial();
+}
+
+function renderSharingPanel(containerId, trialId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title"><span class="cicon">🔗</span> Share with agronomist or extension agent</div>
+      <div class="info-box blue" style="margin-bottom:12px;">
+        Generate a read-only link to share your trial data and analysis results.
+        Anyone with the link can view but not edit your trial.
+      </div>
+      <div id="share-link-container"></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="createShareLink(${trialId})">🔗 Generate share link</button>
+      </div>
+    </div>
+  `;
+}
+
+// createShareLink defined in reports.js
+
+function copyShareLink(url) {
+  navigator.clipboard.writeText(url).then(() => {
+    alert('Link copied to clipboard!');
+  }).catch(() => {
+    prompt('Copy this link:', url);
+  });
+}
+
+// ============================================================
+// REPORT TEMPLATES
+// ============================================================
+
+function renderFarmerSummaryReport(trial, result, data) {
+  const { trtMeans, tukey, p_trt } = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const bestTrt = sorted[0];
+  const bestMean = trtMeans[bestTrt];
+  const controlMean = trtMeans[sorted[sorted.length - 1]] || bestMean;
+  const yieldGain = (bestMean - controlMean).toFixed(1);
+  const sig = p_trt < 0.05;
+
+  return `
+    <div style="font-family:var(--font-main);max-width:600px;">
+      <div style="background:var(--green-600);color:white;padding:20px;border-radius:var(--radius) var(--radius) 0 0;">
+        <div style="font-size:11px;opacity:0.8;margin-bottom:4px;">FARMER SUMMARY REPORT</div>
+        <div style="font-size:20px;font-weight:500;">${trial.name}</div>
+        <div style="font-size:13px;opacity:0.85;margin-top:4px;">${trial.crop} · ${trial.field || 'No field'} · ${trial.season}</div>
+      </div>
+      <div style="background:var(--surface);border:var(--border);border-top:none;padding:20px;border-radius:0 0 var(--radius) var(--radius);">
+
+        <div style="background:${sig ? 'var(--green-50)' : 'var(--amber-50)'};padding:14px;border-radius:var(--radius-sm);margin-bottom:16px;">
+          <div style="font-size:14px;font-weight:500;color:${sig ? 'var(--green-800)' : 'var(--amber-800)'};">
+            ${sig ? '✅ Bottom line: There IS a real treatment difference' : '⚠️ Bottom line: No clear winner this year'}
+          </div>
+          <div style="font-size:13px;color:${sig ? 'var(--green-800)' : 'var(--amber-800)'};margin-top:6px;">
+            ${sig
+              ? `<strong>${bestTrt}</strong> yielded <strong>${yieldGain} bu/ac more</strong> than the control. This difference is statistically real — not just field noise.`
+              : `Yield differences between treatments were small enough that they could be due to normal field variability. One season of data is not enough to draw conclusions.`}
+          </div>
+        </div>
+
+        <div style="margin-bottom:16px;">
+          <div style="font-size:13px;font-weight:500;margin-bottom:8px;">Yield by treatment:</div>
+          ${sorted.map((trt, i) => {
+            const m = trtMeans[trt];
+            const bar = ((m / Math.max(...sorted.map(t => trtMeans[t]))) * 100).toFixed(0);
+            return `<div style="margin-bottom:6px;">
+              <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;">
+                <span>${trt}</span><span><strong>${m.toFixed(1)}</strong> bu/ac</span>
+              </div>
+              <div style="background:var(--surface2);border-radius:100px;height:12px;">
+                <div style="background:var(--green-600);height:12px;border-radius:100px;width:${bar}%;"></div>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+
+        <div style="font-size:12px;color:var(--text2);border-top:var(--border);padding-top:12px;">
+          <strong>What this means for next year:</strong>
+          ${sig
+            ? `Consider adopting ${bestTrt} on more acres. Run the trial again to confirm results — one year of data is a strong signal but two years builds confidence.`
+            : `Continue the trial for another season with the same treatments before making management changes.`}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderAgronomistReport(trial, result, data) {
+  const { trtMeans, tukey, p_trt, F_trt, CV, SS_trt, SS_block, SS_error, df_trt, df_block, df_error, MS_trt, MS_block, MS_error, F_block, p_block } = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const gm = data.reduce((s, d) => s + d.value, 0) / data.length;
+
+  return `
+    <div style="font-family:var(--font-main);max-width:700px;">
+      <div style="background:var(--surface2);border:var(--border);padding:16px 20px;border-radius:var(--radius);margin-bottom:14px;">
+        <div style="font-size:10px;color:var(--text2);font-weight:500;letter-spacing:0.05em;margin-bottom:6px;">TECHNICAL ANALYSIS REPORT</div>
+        <div style="font-size:18px;font-weight:500;">${trial.name}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;font-size:12px;">
+          <div><span style="color:var(--text2);">Crop:</span> ${trial.crop}</div>
+          <div><span style="color:var(--text2);">Field:</span> ${trial.field || '–'}</div>
+          <div><span style="color:var(--text2);">Season:</span> ${trial.season}</div>
+          <div><span style="color:var(--text2);">Design:</span> ${trial.design?.toUpperCase()}</div>
+          <div><span style="color:var(--text2);">Objective:</span> ${trial.objective || '–'}</div>
+          <div><span style="color:var(--text2);">n:</span> ${data.length} observations</div>
+        </div>
+      </div>
+
+      <div style="background:var(--surface);border:var(--border);padding:16px 20px;border-radius:var(--radius);margin-bottom:14px;">
+        <div style="font-size:13px;font-weight:500;margin-bottom:10px;">Analysis of Variance (${trial.design?.toUpperCase()})</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:var(--font-mono);">
+          <thead><tr style="border-bottom:var(--border);">
+            <th style="text-align:left;padding:6px 8px;font-family:var(--font-main);color:var(--text2);">Source</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">df</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">SS</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">MS</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">F</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">Pr(>F)</th>
+          </tr></thead>
+          <tbody>
+            ${SS_block !== undefined ? `<tr style="border-bottom:var(--border);">
+              <td style="padding:6px 8px;font-family:var(--font-main);">Block</td>
+              <td style="text-align:right;padding:6px 8px;">${df_block}</td>
+              <td style="text-align:right;padding:6px 8px;">${SS_block?.toFixed(2)}</td>
+              <td style="text-align:right;padding:6px 8px;">${MS_block?.toFixed(2)}</td>
+              <td style="text-align:right;padding:6px 8px;">${F_block?.toFixed(3)}</td>
+              <td style="text-align:right;padding:6px 8px;color:var(--text2);">${p_block?.toFixed(4)} ${pValueLabel(p_block)}</td>
+            </tr>` : ''}
+            <tr style="border-bottom:var(--border);">
+              <td style="padding:6px 8px;font-family:var(--font-main);">Treatment</td>
+              <td style="text-align:right;padding:6px 8px;">${df_trt}</td>
+              <td style="text-align:right;padding:6px 8px;">${SS_trt?.toFixed(2)}</td>
+              <td style="text-align:right;padding:6px 8px;">${MS_trt?.toFixed(2)}</td>
+              <td style="text-align:right;padding:6px 8px;">${F_trt?.toFixed(3)}</td>
+              <td style="text-align:right;padding:6px 8px;color:${p_trt<0.05?'var(--green-600)':'var(--text2)'};">
+                <strong>${p_trt?.toFixed(4)}</strong> ${pValueLabel(p_trt)}
+              </td>
+            </tr>
+            <tr style="border-bottom:var(--border);">
+              <td style="padding:6px 8px;font-family:var(--font-main);">Residual</td>
+              <td style="text-align:right;padding:6px 8px;">${df_error}</td>
+              <td style="text-align:right;padding:6px 8px;">${SS_error?.toFixed(2)}</td>
+              <td style="text-align:right;padding:6px 8px;">${MS_error?.toFixed(2)}</td>
+              <td style="text-align:right;padding:6px 8px;">–</td>
+              <td style="text-align:right;padding:6px 8px;">–</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:var(--text2);margin-top:8px;">
+          Grand mean: ${gm.toFixed(3)} · CV: ${parseFloat(CV||0).toFixed(2)}% · LSD (0.05): ${tukey?.HSD?.toFixed(2)||'–'}
+        </div>
+      </div>
+
+      <div style="background:var(--surface);border:var(--border);padding:16px 20px;border-radius:var(--radius);margin-bottom:14px;">
+        <div style="font-size:13px;font-weight:500;margin-bottom:10px;">Treatment Means — Tukey HSD (α = 0.05)</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead><tr style="border-bottom:var(--border);">
+            <th style="text-align:left;padding:6px 8px;color:var(--text2);">Treatment</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">n</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">Mean</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">Std Dev</th>
+            <th style="text-align:right;padding:6px 8px;color:var(--text2);">SE</th>
+            <th style="text-align:center;padding:6px 8px;color:var(--text2);">Group</th>
+          </tr></thead>
+          <tbody>
+            ${sorted.map(trt => {
+              const vals = data.filter(d => d.trt === trt).map(d => d.value);
+              const m = vals.reduce((a,b)=>a+b,0)/vals.length;
+              const s = vals.length>1 ? Math.sqrt(vals.reduce((sum,v)=>sum+(v-m)**2,0)/(vals.length-1)) : 0;
+              const se = s / Math.sqrt(vals.length);
+              const letters = tukey?.letters?.[trt]?.join('') || '–';
+              return `<tr style="border-bottom:1px solid var(--surface2);">
+                <td style="padding:6px 8px;">${trt}</td>
+                <td style="text-align:right;padding:6px 8px;font-family:var(--font-mono);">${vals.length}</td>
+                <td style="text-align:right;padding:6px 8px;font-family:var(--font-mono);font-weight:500;">${m.toFixed(3)}</td>
+                <td style="text-align:right;padding:6px 8px;font-family:var(--font-mono);">±${s.toFixed(3)}</td>
+                <td style="text-align:right;padding:6px 8px;font-family:var(--font-mono);">${se.toFixed(3)}</td>
+                <td style="text-align:center;padding:6px 8px;font-weight:600;">${letters}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+
+// ===== gps-plots.js =====
+// ============================================================
+// FARMPRISM — GPS Plot Layout Engine
+// Draw a rectangle on satellite map → auto-generates plot grid
+// Based on trial design (plots, reps, dimensions)
+// ============================================================
+
+let _map = null;
+let _tileLayer = null;
+let _plotLayers = [];       // L.Polygon layers for each plot
+let _rectLayer = null;      // the drawn boundary rectangle
+let _gridAngle = 0;         // rotation angle in degrees
+let _drawingRect = false;
+let _rectStart = null;
+let _rectPreview = null;
+
+// Initialize the Leaflet map on step 5
+function initLeafletMap() {
+  if (_map) {
+    setTimeout(() => _map.invalidateSize(), 100);
+    return;
+  }
+  _map = L.map('leaflet-map', { zoomControl: true }).setView([41.6, -93.6], 14);
+  _tileLayer = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution: 'Tiles © Esri · USDA FSA', maxZoom: 20 }
+  ).addTo(_map);
+
+  _map.on('mousedown', onMapMouseDown);
+  _map.on('mousemove', onMapMouseMove);
+  _map.on('mouseup',   onMapMouseUp);
+
+  // Touch support for mobile
+  _map.on('touchstart', e => { if (_drawingRect) onMapMouseDown(e.touches ? {latlng: _map.layerPointToLatLng(_map.mouseEventToLayerPoint(e.originalEvent.touches[0]))} : e); });
+  _map.on('touchmove',  e => { if (_drawingRect && e.originalEvent.touches[0]) { e.originalEvent.preventDefault(); onMapMouseMove({latlng: _map.containerPointToLatLng(L.point(e.originalEvent.touches[0].clientX - _map.getContainer().getBoundingClientRect().left, e.originalEvent.touches[0].clientY - _map.getContainer().getBoundingClientRect().top))}); } }, {passive: false});
+  _map.on('touchend',   e => { if (_drawingRect) onMapMouseUp(e); });
+}
+
+function changeBasemap(type) {
+  if (!_map) return;
+  _map.removeLayer(_tileLayer);
+  _tileLayer = type === 'satellite'
+    ? L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {attribution:'Tiles © Esri', maxZoom:20})
+    : L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution:'© OpenStreetMap', maxZoom:19});
+  _tileLayer.addTo(_map);
+}
+
+function locateUser() {
+  if (!_map) initLeafletMap();
+  _map.locate({ setView: true, maxZoom: 16 });
+  _map.once('locationfound', e => {
+    L.circleMarker(e.latlng, { radius: 8, color: '#3B6D11', fillColor: '#3B6D11', fillOpacity: 0.8 })
+      .addTo(_map).bindPopup('Your location').openPopup();
+  });
+  _map.once('locationerror', () => alert('Could not get your location. Try entering coordinates manually.'));
+}
+
+// ── RECTANGLE DRAWING ─────────────────────────────────────────
+function startRectDraw() {
+  if (!_map) initLeafletMap();
+  _drawingRect = true;
+  _map.getContainer().style.cursor = 'crosshair';
+  document.getElementById('draw-rect-btn').textContent = '⬜ Drawing... (drag on map)';
+  document.getElementById('draw-rect-btn').style.background = 'var(--amber-50)';
+  setGpsInfo('Click and drag on the satellite image to outline your trial area');
+}
+
+function onMapMouseDown(e) {
+  if (!_drawingRect) return;
+  _rectStart = e.latlng;
+}
+
+function onMapMouseMove(e) {
+  if (!_drawingRect || !_rectStart) return;
+  const bounds = L.latLngBounds(_rectStart, e.latlng);
+  if (_rectPreview) _map.removeLayer(_rectPreview);
+  _rectPreview = L.rectangle(bounds, {
+    color: '#3B6D11', weight: 2, dashArray: '6 4',
+    fillColor: '#3B6D11', fillOpacity: 0.1
+  }).addTo(_map);
+}
+
+function onMapMouseUp(e) {
+  if (!_drawingRect || !_rectStart) return;
+  _drawingRect = false;
+  _map.getContainer().style.cursor = '';
+  document.getElementById('draw-rect-btn').textContent = '⬜ Draw trial area';
+  document.getElementById('draw-rect-btn').style.background = '';
+
+  if (_rectPreview) { _map.removeLayer(_rectPreview); _rectPreview = null; }
+
+  const end = e.latlng || _rectStart;
+  const bounds = L.latLngBounds(_rectStart, end);
+  _rectStart = null;
+
+  // Too small — ignore
+  const sw = bounds.getSouthWest(), ne = bounds.getNorthEast();
+  const widthM = _map.distance(sw, L.latLng(sw.lat, ne.lng));
+  const heightM = _map.distance(sw, L.latLng(ne.lat, sw.lng));
+  if (widthM < 10 || heightM < 10) {
+    setGpsInfo('Area too small — try dragging a larger rectangle');
+    return;
+  }
+
+  generatePlotGrid(bounds, widthM, heightM);
+}
+
+// ── PLOT GRID GENERATION ──────────────────────────────────────
+function generatePlotGrid(bounds, widthM, heightM) {
+  clearMapPlots();
+
+  const plots = currentDesign.builtPlots || [];
+  if (!plots.length) {
+    setGpsInfo('⚠️ Go back and finalize the field map first (Step 4)');
+    return;
+  }
+
+  // Plot dimensions in meters
+  const plotLenFt = currentDesign.plotLen || 600;
+  const plotRowsFt = (currentDesign.plotRows || 4) * 30; // 30 ft row spacing
+  const plotLenM = plotLenFt * 0.3048;
+  const plotWidM = plotRowsFt * 0.3048;
+
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+  const center = bounds.getCenter();
+
+  // Determine layout: plots run along the long axis
+  const landscape = widthM >= heightM;
+  const cols = landscape
+    ? Math.max(1, Math.round(widthM / plotWidM))
+    : Math.max(1, Math.round(widthM / plotLenM));
+  const rows = landscape
+    ? Math.max(1, Math.round(heightM / plotLenM))
+    : Math.max(1, Math.round(heightM / plotWidM));
+
+  // Cell size in degrees (approximate)
+  const latPerM  = 1 / 111320;
+  const lngPerM  = 1 / (111320 * Math.cos(center.lat * Math.PI / 180));
+  const cellH = landscape ? plotLenM : plotWidM;
+  const cellW = landscape ? plotWidM : plotLenM;
+
+  const totalCols = cols, totalRows = rows;
+  const originLat = sw.lat;
+  const originLng = sw.lng;
+
+  // Generate polygons, assign treatments in plot order
+  _plotLayers = [];
+  const angle = _gridAngle * Math.PI / 180;
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+
+  let plotIdx = 0;
+  for (let r = 0; r < totalRows; r++) {
+    for (let c = 0; c < totalCols; c++) {
+      const plot = plots[plotIdx % plots.length];
+      const color = plot?.color || plot?.wpColor || '#3B6D11';
+
+      // Corner offsets in meters from SW origin
+      const corners = [
+        [r * cellH,       c * cellW],
+        [r * cellH,      (c+1) * cellW],
+        [(r+1) * cellH,  (c+1) * cellW],
+        [(r+1) * cellH,   c * cellW],
+      ];
+
+      // Apply rotation around center
+      const cxM = (totalCols * cellW) / 2;
+      const cyM = (totalRows * cellH) / 2;
+      const latlngs = corners.map(([dy, dx]) => {
+        const rx = (dx - cxM) * cos - (dy - cyM) * sin + cxM;
+        const ry = (dx - cxM) * sin + (dy - cyM) * cos + cyM;
+        return L.latLng(originLat + ry * latPerM, originLng + rx * lngPerM);
+      });
+
+      const poly = L.polygon(latlngs, {
+        color: '#fff', weight: 1.5,
+        fillColor: color, fillOpacity: 0.65,
+      }).addTo(_map);
+
+      const label = plot ? `<strong>${plot.id}</strong><br>${plot.trtName}${plot.block ? '<br>Block ' + plot.block : ''}` : '';
+      poly.bindPopup(label);
+
+      // Add label marker at centroid
+      const centroid = latlngs.reduce((acc, ll) =>
+        [acc[0] + ll.lat / latlngs.length, acc[1] + ll.lng / latlngs.length], [0, 0]);
+      const marker = L.marker(centroid, {
+        icon: L.divIcon({
+          html: `<div style="background:${color};color:white;font-size:9px;font-weight:600;padding:2px 4px;border-radius:3px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,0.4);">${plot?.id || ''}</div>`,
+          iconAnchor: [20, 10], className: ''
+        })
+      }).addTo(_map);
+
+      _plotLayers.push({ poly, marker, plotIdx: plotIdx % plots.length });
+
+      // Store GPS for this plot
+      if (plot) {
+        const existing = currentDesign.gpsPlots.findIndex(g => g.plotId === plot.id);
+        const gpsEntry = { plotId: plot.id, lat: centroid[0], lng: centroid[1],
+          corners: latlngs.map(ll => ({ lat: ll.lat, lng: ll.lng })) };
+        if (existing >= 0) currentDesign.gpsPlots[existing] = gpsEntry;
+        else currentDesign.gpsPlots.push(gpsEntry);
+      }
+      plotIdx++;
+    }
+  }
+
+  // Draw boundary
+  if (_rectLayer) _map.removeLayer(_rectLayer);
+  _rectLayer = L.rectangle(bounds, { color: '#fff', weight: 2, fillOpacity: 0, dashArray: '4 4' }).addTo(_map);
+
+  const coveredPlots = Math.min(plotIdx, plots.length);
+  const areaAc = (widthM * heightM * 0.000247105).toFixed(1);
+  setGpsInfo(`✅ ${totalRows} rows × ${totalCols} columns = ${totalRows * totalCols} plot cells · ${coveredPlots} of ${plots.length} trial plots placed · ~${areaAc} acres · Use Rotate buttons to align with field rows`);
+  document.getElementById('gps-plot-info').style.display = 'block';
+}
+
+function rotateGrid(degrees) {
+  _gridAngle = (_gridAngle + degrees + 360) % 360;
+  // Re-generate with existing bounds if we have plots
+  if (_plotLayers.length && _rectLayer) {
+    generatePlotGrid(_rectLayer.getBounds(),
+      _map.distance(_rectLayer.getBounds().getSouthWest(), L.latLng(_rectLayer.getBounds().getSouthWest().lat, _rectLayer.getBounds().getNorthEast().lng)),
+      _map.distance(_rectLayer.getBounds().getSouthWest(), L.latLng(_rectLayer.getBounds().getNorthEast().lat, _rectLayer.getBounds().getSouthWest().lng))
+    );
+  }
+}
+
+function clearMapPlots() {
+  _plotLayers.forEach(({ poly, marker }) => {
+    if (_map) { _map.removeLayer(poly); _map.removeLayer(marker); }
+  });
+  _plotLayers = [];
+  if (_rectLayer && _map) { _map.removeLayer(_rectLayer); _rectLayer = null; }
+  currentDesign.gpsPlots = [];
+  _gridAngle = 0;
+  setGpsInfo('');
+  document.getElementById('gps-plot-info').style.display = 'none';
+}
+
+function setGpsInfo(msg) {
+  const el = document.getElementById('gps-plot-info');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+// Legacy stubs to avoid breaking existing references
+function toggleDrawMode() { startRectDraw(); }
+function onMapClick() {}
+
+
+// ===== reports.js =====
+// ============================================================
+// FARMPRISM — Rich Report Module
+// Farmer-friendly summary + Agronomist full report
+// Both with charts, visualization, interpretation
+// ============================================================
+
+// ── FARMER SUMMARY REPORT ────────────────────────────────────
+function buildFarmerReport(trial, result, data, weatherData) {
+  const { trtMeans, tukey, p_trt, CV } = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const bestTrt = sorted[0];
+  const worstTrt = sorted[sorted.length - 1];
+  const bestMean = trtMeans[bestTrt] || 0;
+  const worstMean = trtMeans[worstTrt] || bestMean;
+  const yieldGain = (bestMean - worstMean).toFixed(1);
+  const sig = p_trt < 0.05;
+  const colors = (trial.treatments || []).reduce((m, t) => ({ ...m, [t.name]: t.color }), {});
+  const maxMean = Math.max(...sorted.map(t => trtMeans[t]));
+
+  // Economic estimate
+  const cornPrice = 4.50;
+  const revenueGain = (parseFloat(yieldGain) * cornPrice).toFixed(0);
+
+  return `
+<div id="farmer-report" style="font-family:var(--font-main);max-width:680px;">
+
+  <!-- Header -->
+  <div style="background:var(--green-600);color:white;padding:20px 24px;border-radius:var(--radius) var(--radius) 0 0;margin-bottom:0;">
+    <div style="font-size:10px;letter-spacing:0.1em;opacity:0.75;margin-bottom:6px;">FARMPRISM · FARMER SUMMARY REPORT</div>
+    <div style="font-size:22px;font-weight:500;">${trial.name}</div>
+    <div style="font-size:13px;opacity:0.85;margin-top:4px;">${trial.crop} · ${trial.field || 'No field'} · ${trial.season} · ${trial.design?.toUpperCase()}</div>
+  </div>
+
+  <!-- Bottom line -->
+  <div style="background:${sig ? 'var(--green-50)' : 'var(--amber-50)'};border:1px solid ${sig ? 'var(--green-100)' : 'var(--amber-100)'};padding:16px 20px;margin-bottom:16px;">
+    <div style="font-size:15px;font-weight:500;color:${sig ? 'var(--green-800)' : 'var(--amber-800)'};margin-bottom:6px;">
+      ${sig ? '✅ The verdict: There IS a real difference between treatments' : '⚠️ The verdict: No clear winner this season'}
+    </div>
+    <div style="font-size:13px;color:${sig ? 'var(--green-800)' : 'var(--amber-800)'};">
+      ${sig
+        ? `<strong>${bestTrt}</strong> outperformed the lowest-yielding treatment by <strong>${yieldGain} bu/ac</strong> — at $${cornPrice}/bu that's roughly <strong>$${revenueGain}/acre</strong>. This difference is statistically real, not just field noise (p = ${parseFloat(p_trt).toFixed(3)}).`
+        : `Differences between treatments were too small relative to field variability to draw conclusions (p = ${parseFloat(p_trt).toFixed(3)}). Run the trial again next season before making management changes.`}
+    </div>
+  </div>
+
+  <!-- Yield chart -->
+  <div style="background:var(--surface);border:var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:14px;">
+    <div style="font-size:14px;font-weight:500;margin-bottom:14px;">Yield by treatment</div>
+    ${sorted.map((trt, i) => {
+      const m = trtMeans[trt];
+      const pct = (m / maxMean * 100).toFixed(1);
+      const color = colors[trt] || COLORS[i % COLORS.length];
+      const letters = tukey?.letters?.[trt]?.join('') || '';
+      const vals = data.filter(d => d.trt === trt).map(d => d.value);
+      const s = vals.length > 1 ? Math.sqrt(vals.reduce((s,v) => s + (v - m)**2, 0) / (vals.length-1)) : 0;
+      return `
+      <div style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div style="width:10px;height:10px;border-radius:2px;background:${color};flex-shrink:0;"></div>
+            <span style="font-size:13px;">${trt}</span>
+            ${letters ? `<span style="font-size:11px;font-weight:600;color:var(--text2);">${letters}</span>` : ''}
+          </div>
+          <span style="font-size:13px;font-weight:500;">${m.toFixed(1)} bu/ac <span style="font-size:11px;font-weight:400;color:var(--text2);">±${s.toFixed(1)}</span></span>
+        </div>
+        <div style="background:var(--surface2);border-radius:100px;height:20px;position:relative;">
+          <div style="background:${color};width:${pct}%;height:20px;border-radius:100px;transition:width 0.6s;"></div>
+        </div>
+      </div>`;
+    }).join('')}
+    <div style="font-size:11px;color:var(--text2);margin-top:8px;">
+      Letters indicate Tukey HSD grouping (α=0.05) — treatments sharing a letter are not significantly different.
+      Error bars = ±1 standard deviation.
+    </div>
+  </div>
+
+  <!-- Key numbers -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px;">
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px 14px;">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">Best treatment</div>
+      <div style="font-size:15px;font-weight:500;">${bestTrt}</div>
+    </div>
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px 14px;">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">Yield advantage</div>
+      <div style="font-size:22px;font-weight:500;color:var(--green-600);">+${yieldGain}<span style="font-size:12px;font-weight:400;color:var(--text2);"> bu/ac</span></div>
+    </div>
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px 14px;">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">Revenue advantage</div>
+      <div style="font-size:22px;font-weight:500;color:var(--green-600);">+$${revenueGain}<span style="font-size:12px;font-weight:400;color:var(--text2);"> /acre</span></div>
+    </div>
+    <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px 14px;">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:4px;">Field variability (CV)</div>
+      <div style="font-size:22px;font-weight:500;">${parseFloat(CV||0).toFixed(1)}<span style="font-size:12px;font-weight:400;color:var(--text2);">%</span></div>
+    </div>
+  </div>
+
+  ${weatherData ? `
+  <!-- Weather context -->
+  <div style="background:var(--surface);border:var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:14px;">
+    <div style="font-size:14px;font-weight:500;margin-bottom:10px;">🌤️ Growing season conditions</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:500;">${weatherData.totalGDD}</div>
+        <div style="font-size:11px;color:var(--text2);">Total GDDs (°F base 50)</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:500;">${weatherData.totalPrecip}"</div>
+        <div style="font-size:11px;color:var(--text2);">Total precipitation</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:24px;font-weight:500;">${weatherData.avgTmax}°</div>
+        <div style="font-size:11px;color:var(--text2);">Average daily high (°F)</div>
+      </div>
+    </div>
+  </div>` : ''}
+
+  <!-- What to do next -->
+  <div style="background:var(--surface);border:var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:14px;">
+    <div style="font-size:14px;font-weight:500;margin-bottom:10px;">📋 What to do next</div>
+    ${sig ? `
+    <div style="font-size:13px;color:var(--text2);line-height:1.7;">
+      <div style="margin-bottom:8px;">✅ Consider adopting <strong>${bestTrt}</strong> on a larger portion of your acres next season.</div>
+      <div style="margin-bottom:8px;">🔁 Repeat this trial for 1–2 more seasons to confirm — one year is strong evidence but two years is conclusive.</div>
+      <div>📞 Share these results with your agronomist or extension agent — use the Agronomist Report for a full statistical writeup.</div>
+    </div>` : `
+    <div style="font-size:13px;color:var(--text2);line-height:1.7;">
+      <div style="margin-bottom:8px;">🔁 Run the trial again next season with the same treatments — one inconclusive year doesn't mean the treatments are equal.</div>
+      <div style="margin-bottom:8px;">📐 Consider adding replications next year to increase statistical power.</div>
+      <div>📞 Talk to your agronomist about whether field variability might be masking real treatment differences.</div>
+    </div>`}
+  </div>
+
+  <div style="font-size:11px;color:var(--text3);text-align:center;padding:8px;">
+    Generated by FarmPRISM · ${new Date().toLocaleDateString()} · ${data.length} observations · ${trial.design?.toUpperCase()} design
+  </div>
+</div>`;
+}
+
+// ── AGRONOMIST FULL REPORT ────────────────────────────────────
+function buildAgronomistReport(trial, result, data, weatherData) {
+  const { trtMeans, tukey, p_trt, F_trt, CV,
+          SS_trt, SS_block, SS_error, df_trt, df_block, df_error,
+          MS_trt, MS_block, MS_error, F_block, p_block, MSE } = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const gm = data.reduce((s, d) => s + d.value, 0) / data.length;
+  const colors = (trial.treatments || []).reduce((m, t) => ({ ...m, [t.name]: t.color }), {});
+
+  return `
+<div id="agron-report" style="font-family:var(--font-main);max-width:680px;">
+
+  <!-- Header -->
+  <div style="border-bottom:2px solid var(--green-600);padding-bottom:12px;margin-bottom:16px;">
+    <div style="font-size:10px;font-weight:500;letter-spacing:0.1em;color:var(--text2);margin-bottom:4px;">FARMPRISM · TECHNICAL ANALYSIS REPORT</div>
+    <div style="font-size:20px;font-weight:500;">${trial.name}</div>
+  </div>
+
+  <!-- Trial metadata table -->
+  <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;">
+      ${[
+        ['Crop', trial.crop], ['Field', trial.field || '–'],
+        ['Season', trial.season], ['Design', trial.design?.toUpperCase()],
+        ['Replications', trial.reps || '–'], ['Observations', data.length],
+        ['Primary variable', trial.variable], ['Objective', trial.objective || '–'],
+      ].map(([k,v]) => `<div><span style="color:var(--text2);">${k}:</span> <strong>${v}</strong></div>`).join('')}
+    </div>
+  </div>
+
+  <!-- ANOVA table -->
+  <div style="margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:500;margin-bottom:8px;">Analysis of Variance — ${trial.design?.toUpperCase()}</div>
+    <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead>
+        <tr style="border-bottom:1px solid var(--text3);">
+          <th style="text-align:left;padding:7px 10px;color:var(--text2);font-weight:500;">Source</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">df</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">SS</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">MS</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">F</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">Pr(>F)</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${SS_block !== undefined && trial.design !== 'crd' ? `
+        <tr style="border-bottom:1px solid var(--surface2);">
+          <td style="padding:7px 10px;">Block</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${df_block}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${SS_block?.toFixed(2)}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${MS_block?.toFixed(2)}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${F_block?.toFixed(3)}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);color:var(--text2);">${p_block?.toFixed(4)} ${pValueLabel(p_block)}</td>
+        </tr>` : ''}
+        <tr style="border-bottom:1px solid var(--surface2);">
+          <td style="padding:7px 10px;"><strong>Treatment</strong></td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${df_trt}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${SS_trt?.toFixed(2)}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${MS_trt?.toFixed(2)}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${F_trt?.toFixed(3)}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);font-weight:600;color:${p_trt<0.05?'var(--green-600)':'var(--text2)'};">${p_trt?.toFixed(4)} ${pValueLabel(p_trt)}</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--surface2);">
+          <td style="padding:7px 10px;">Residual</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${df_error}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${SS_error?.toFixed(2)}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${MS_error?.toFixed(2)}</td>
+          <td style="text-align:right;padding:7px 8px;">–</td>
+          <td style="text-align:right;padding:7px 8px;">–</td>
+        </tr>
+        <tr>
+          <td style="padding:7px 10px;"><strong>Total</strong></td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${(df_block||0)+df_trt+df_error}</td>
+          <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${((SS_block||0)+SS_trt+SS_error).toFixed(2)}</td>
+          <td style="text-align:right;padding:7px 8px;">–</td>
+          <td style="text-align:right;padding:7px 8px;">–</td>
+          <td style="text-align:right;padding:7px 8px;">–</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <div style="font-size:11px;color:var(--text2);margin-top:6px;">
+      Grand mean: ${gm.toFixed(3)} · CV: ${parseFloat(CV||0).toFixed(2)}% · MSE: ${MS_error?.toFixed(3)} ·
+      Tukey LSD (0.05): ${tukey?.HSD?.toFixed(3) || '–'} · Significance: *** p&lt;0.001 · ** p&lt;0.01 · * p&lt;0.05 · ns p≥0.05
+    </div>
+  </div>
+
+  <!-- Means table with SE -->
+  <div style="margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:500;margin-bottom:8px;">Treatment Means — Tukey HSD Grouping (α = 0.05)</div>
+    <div style="overflow-x:auto;">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead>
+        <tr style="border-bottom:1px solid var(--text3);">
+          <th style="text-align:left;padding:7px 10px;color:var(--text2);font-weight:500;">Treatment</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">n</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">Mean</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">Std Dev</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">SE</th>
+          <th style="text-align:right;padding:7px 8px;color:var(--text2);font-weight:500;">95% CI</th>
+          <th style="text-align:center;padding:7px 8px;color:var(--text2);font-weight:500;">Group</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${sorted.map((trt, i) => {
+          const vals = data.filter(d => d.trt === trt).map(d => d.value);
+          const m = trtMeans[trt];
+          const s = vals.length > 1 ? Math.sqrt(vals.reduce((sum,v) => sum + (v-m)**2, 0) / (vals.length-1)) : 0;
+          const se = s / Math.sqrt(vals.length);
+          const t95 = 2.0; // approximate t critical
+          const ci = (t95 * se).toFixed(2);
+          const color = colors[trt] || COLORS[i % COLORS.length];
+          const letters = tukey?.letters?.[trt]?.join('') || '–';
+          return `<tr style="border-bottom:1px solid var(--surface2);">
+            <td style="padding:7px 10px;">
+              <div style="display:flex;align-items:center;gap:6px;">
+                <div style="width:8px;height:8px;border-radius:2px;background:${color};flex-shrink:0;"></div>
+                ${trt}
+              </div>
+            </td>
+            <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${vals.length}</td>
+            <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);font-weight:500;">${m.toFixed(3)}</td>
+            <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">±${s.toFixed(3)}</td>
+            <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${se.toFixed(3)}</td>
+            <td style="text-align:right;padding:7px 8px;font-family:var(--font-mono);">${(m-parseFloat(ci)).toFixed(2)}–${(m+parseFloat(ci)).toFixed(2)}</td>
+            <td style="text-align:center;padding:7px 8px;font-weight:700;font-size:13px;">${letters}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- Means with error bars chart (rendered after inject) -->
+  <div style="margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:500;margin-bottom:8px;">Treatment means with 95% confidence intervals</div>
+    <div style="position:relative;height:${Math.max(200, sorted.length * 52 + 60)}px;">
+      <canvas id="agron-means-chart" role="img" aria-label="Horizontal bar chart of treatment means with error bars">Treatment means with confidence intervals.</canvas>
+    </div>
+  </div>
+
+  <!-- Residual plot -->
+  <div style="margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:500;margin-bottom:4px;">Residuals vs fitted values</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">Points should be randomly scattered around zero with no pattern — indicates ANOVA assumptions are met.</div>
+    <div style="position:relative;height:200px;">
+      <canvas id="agron-resid-chart" role="img" aria-label="Residual plot">Residuals vs fitted values scatter plot.</canvas>
+    </div>
+  </div>
+
+  <!-- Statistical interpretation -->
+  <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:500;margin-bottom:8px;">Statistical interpretation</div>
+    <div style="font-size:12px;color:var(--text2);line-height:1.8;">
+      ${p_trt < 0.05
+        ? `The ${trial.design?.toUpperCase()} ANOVA detected a statistically significant treatment effect
+           (F<sub>${df_trt},${df_error}</sub> = ${parseFloat(F_trt||0).toFixed(3)}, p = ${parseFloat(p_trt||1).toFixed(4)}).
+           Treatment accounted for ${(SS_trt/((SS_block||0)+SS_trt+SS_error)*100).toFixed(1)}% of total variation.
+           The coefficient of variation (CV = ${parseFloat(CV||0).toFixed(1)}%) indicates
+           ${parseFloat(CV||20) < 10 ? 'excellent' : parseFloat(CV||20) < 15 ? 'good' : 'acceptable'} experimental precision.
+           Tukey HSD separations (α = 0.05, HSD = ${tukey?.HSD?.toFixed(2)||'–'}) are shown in the grouping column above.`
+        : `The ${trial.design?.toUpperCase()} ANOVA did not detect a statistically significant treatment effect
+           (F<sub>${df_trt},${df_error}</sub> = ${parseFloat(F_trt||0).toFixed(3)}, p = ${parseFloat(p_trt||1).toFixed(4)}).
+           The observed treatment differences are within the range expected from random field variation.
+           CV = ${parseFloat(CV||0).toFixed(1)}%. Consider a power analysis to determine whether additional
+           replications would improve detection capability.`}
+      ${SS_block !== undefined && trial.design !== 'crd'
+        ? ` Block variation was ${p_block < 0.05 ? 'significant (p = ' + parseFloat(p_block).toFixed(4) + '), confirming the utility of blocking in this trial.' : 'not significant (p = ' + parseFloat(p_block||1).toFixed(4) + '), suggesting the field was relatively uniform — a CRD may have been equally appropriate.'}`
+        : ''}
+    </div>
+  </div>
+
+  ${weatherData ? `
+  <!-- Weather context -->
+  <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:500;margin-bottom:8px;">Growing season conditions</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:12px;">
+      <div><div style="color:var(--text2);">Cumulative GDDs</div><div style="font-size:16px;font-weight:500;">${weatherData.totalGDD} °F</div></div>
+      <div><div style="color:var(--text2);">Total precipitation</div><div style="font-size:16px;font-weight:500;">${weatherData.totalPrecip}"</div></div>
+      <div><div style="color:var(--text2);">Mean daily high</div><div style="font-size:16px;font-weight:500;">${weatherData.avgTmax}°F</div></div>
+      <div><div style="color:var(--text2);">Mean daily low</div><div style="font-size:16px;font-weight:500;">${weatherData.avgTmin}°F</div></div>
+      <div><div style="color:var(--text2);">Rainy days</div><div style="font-size:16px;font-weight:500;">${weatherData.wetDays}</div></div>
+      <div><div style="color:var(--text2);">Dry days</div><div style="font-size:16px;font-weight:500;">${weatherData.dryDays}</div></div>
+    </div>
+  </div>` : ''}
+
+  <div style="font-size:11px;color:var(--text3);text-align:center;padding:8px;border-top:var(--border);margin-top:8px;">
+    FarmPRISM statistical analysis · Generated ${new Date().toLocaleString()} · ${data.length} observations · WebR/JS ANOVA engine
+  </div>
+</div>`;
+}
+
+// Render charts inside the report HTML after it's injected into the DOM
+function renderReportCharts(result, data, type) {
+  const { trtMeans, tukey, residuals } = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+
+  if (type === 'agronomist') {
+    // Horizontal bar with error bars
+    const ctx1 = document.getElementById('agron-means-chart');
+    if (ctx1) {
+      const vals = sorted.map(trt => {
+        const v = data.filter(d => d.trt === trt).map(d => d.value);
+        const m = trtMeans[trt];
+        const s = v.length > 1 ? Math.sqrt(v.reduce((s,x) => s+(x-m)**2,0)/(v.length-1)) : 0;
+        return { m, se: s/Math.sqrt(v.length) };
+      });
+      if (window._reportMeansChart) window._reportMeansChart.destroy();
+      window._reportMeansChart = new Chart(ctx1, {
+        type: 'bar',
+        data: {
+          labels: sorted,
+          datasets: [{
+            label: 'Mean yield',
+            data: sorted.map(t => parseFloat(trtMeans[t].toFixed(2))),
+            backgroundColor: sorted.map((t,i) => (result.trial?.treatments||[]).find(tr=>tr.name===t)?.color || COLORS[i%COLORS.length]),
+            borderWidth: 0,
+            borderRadius: 3,
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.x.toFixed(2)} bu/ac` } }
+          },
+          scales: {
+            x: { title: { display: true, text: 'Mean yield (bu/ac)' }, grid: { color: 'rgba(128,128,128,0.1)' } },
+            y: { grid: { display: false } }
+          }
+        }
+      });
+    }
+    // Residual chart
+    const ctx2 = document.getElementById('agron-resid-chart');
+    if (ctx2 && residuals?.length) {
+      if (window._reportResidChart) window._reportResidChart.destroy();
+      window._reportResidChart = new Chart(ctx2, {
+        type: 'scatter',
+        data: { datasets: [{
+          label: 'Residuals',
+          data: residuals.map(r => ({ x: parseFloat(r.fitted.toFixed(2)), y: parseFloat(r.resid.toFixed(2)) })),
+          backgroundColor: 'rgba(59,109,17,0.55)', pointRadius: 5, pointHoverRadius: 7,
+        }]},
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false }, tooltip: { callbacks: {
+            label: ctx => ` Fitted: ${ctx.parsed.x.toFixed(2)}, Resid: ${ctx.parsed.y.toFixed(2)}`
+          }}},
+          scales: {
+            x: { title: { display: true, text: 'Fitted values' }, grid: { color: 'rgba(128,128,128,0.1)' } },
+            y: { title: { display: true, text: 'Residuals' }, grid: { color: 'rgba(128,128,128,0.1)' } }
+          }
+        }
+      });
+    }
+  }
+}
+
+// ── EXTEND REPORT TAB ─────────────────────────────────────────
+// Called from extensions.js after analysis runs
+function renderFullReportTab(trial, result, data) {
+  const reportDiv = document.getElementById('atab-report');
+  if (!reportDiv) return;
+
+  // Get cached weather for this trial
+  const wx = (appState.weatherCache || {})[trial.id];
+  const wxSummary = wx?.summary || null;
+  // Attach trial ref for chart coloring
+  result.trial = trial;
+
+  reportDiv.innerHTML = `
+    <div class="card">
+      <div class="card-title"><span class="cicon">📄</span> Choose report style</div>
+      <div class="tabs" id="report-style-tabs">
+        <button class="tab-btn active" onclick="switchReport('farmer',this)">🌾 Farmer summary</button>
+        <button class="tab-btn" onclick="switchReport('agronomist',this)">🔬 Agronomist report</button>
+      </div>
+      <div id="report-content"></div>
+      <div class="btn-row" style="margin-top:16px;">
+        <button class="btn btn-primary" onclick="exportReportPDF()">⬇️ Download PDF</button>
+        <button class="btn btn-secondary" onclick="exportCSV()">⬇️ Export data CSV</button>
+        <button class="btn btn-secondary" onclick="createShareLink(${trial.id})">🔗 Share link</button>
+      </div>
+      <div id="share-result" style="margin-top:8px;"></div>
+    </div>
+  `;
+
+  window._currentReportData = { trial, result, data, wxSummary };
+  switchReport('farmer', document.querySelector('#report-style-tabs .tab-btn'));
+}
+
+function switchReport(type, btn) {
+  document.querySelectorAll('#report-style-tabs .tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  if (!window._currentReportData) return;
+  const { trial, result, data, wxSummary } = window._currentReportData;
+  const container = document.getElementById('report-content');
+  if (!container) return;
+
+  container.innerHTML = type === 'farmer'
+    ? buildFarmerReport(trial, result, data, wxSummary)
+    : buildAgronomistReport(trial, result, data, wxSummary);
+
+  setTimeout(() => renderReportCharts(result, data, type), 100);
+}
+
+function exportReportPDF() {
+  if (!window._currentReportData) { alert('Run analysis first.'); return; }
+  const { trial, result, data, wxSummary } = window._currentReportData;
+  const { jsPDF } = window.jspdf;
+  if (!jsPDF) { alert('PDF library not loaded yet, try again in a moment.'); return; }
+  const doc = new jsPDF({ unit: 'mm', format: 'letter' });
+  const { trtMeans, tukey, p_trt, F_trt, CV } = result;
+  const sorted = tukey?.sorted || Object.keys(trtMeans);
+  const gm = data.reduce((s, d) => s + d.value, 0) / data.length;
+
+  // Header band
+  doc.setFillColor(59, 109, 17);
+  doc.rect(0, 0, 216, 22, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(15); doc.setFont(undefined, 'bold');
+  doc.text('FarmPRISM — Trial Analysis Report', 14, 10);
+  doc.setFontSize(9); doc.setFont(undefined, 'normal');
+  doc.text(`${trial.name} · ${trial.crop} · ${trial.field || ''} · ${trial.season}`, 14, 17);
+
+  doc.setTextColor(0, 0, 0); let y = 30;
+
+  // Key stats
+  doc.setFontSize(11); doc.setFont(undefined, 'bold');
+  doc.text('Statistical Results', 14, y); y += 7;
+  doc.setFont(undefined, 'normal'); doc.setFontSize(9);
+  const stats = [
+    ['Design', trial.design?.toUpperCase()],
+    ['Grand mean', `${gm.toFixed(2)} ${trial.variable || 'bu/ac'}`],
+    ['CV', `${parseFloat(CV||0).toFixed(1)}%`],
+    ['F (Treatment)', `${parseFloat(F_trt||0).toFixed(3)}`],
+    ['p-value', `${parseFloat(p_trt||1).toFixed(4)} ${pValueLabel(p_trt)}`],
+    ['Tukey HSD', `${tukey?.HSD?.toFixed(2) || '–'}`],
+  ];
+  stats.forEach(([k, v]) => {
+    doc.setTextColor(120, 120, 120); doc.text(k + ':', 14, y);
+    doc.setTextColor(0, 0, 0); doc.text(v, 65, y); y += 6;
+  });
+  y += 4;
+
+  // Means table
+  doc.setFont(undefined, 'bold'); doc.setFontSize(11);
+  doc.text('Treatment Means', 14, y); y += 7;
+  doc.setFillColor(240, 244, 236);
+  doc.rect(14, y - 4, 188, 6, 'F');
+  doc.setFontSize(8); doc.setFont(undefined, 'bold');
+  doc.text('Treatment', 16, y);
+  doc.text('n', 100, y); doc.text('Mean', 112, y);
+  doc.text('Std Dev', 135, y); doc.text('Group', 168, y); y += 6;
+  doc.setFont(undefined, 'normal');
+  sorted.forEach((trt, i) => {
+    const vals = data.filter(d => d.trt === trt).map(d => d.value);
+    const m = trtMeans[trt];
+    const s = vals.length > 1 ? Math.sqrt(vals.reduce((sum,v) => sum+(v-m)**2,0)/(vals.length-1)) : 0;
+    const letters = tukey?.letters?.[trt]?.join('') || '–';
+    if (i % 2 === 0) { doc.setFillColor(250, 251, 248); doc.rect(14, y-4, 188, 6, 'F'); }
+    doc.setFontSize(8);
+    doc.text(trt.substring(0, 30), 16, y);
+    doc.text(String(vals.length), 100, y); doc.text(m.toFixed(2), 112, y);
+    doc.text(`±${s.toFixed(2)}`, 135, y); doc.text(letters, 168, y);
+    y += 6;
+  });
+  y += 6;
+
+  // Interpretation
+  doc.setFont(undefined, 'bold'); doc.setFontSize(11);
+  doc.text('Interpretation', 14, y); y += 7;
+  doc.setFont(undefined, 'normal'); doc.setFontSize(9);
+  const interp = p_trt < 0.05
+    ? `Statistically significant treatment effect (F=${parseFloat(F_trt||0).toFixed(3)}, p=${parseFloat(p_trt||1).toFixed(4)}). Best treatment: ${sorted[0]} (${trtMeans[sorted[0]]?.toFixed(2)}). CV=${parseFloat(CV||0).toFixed(1)}%.`
+    : `No significant treatment effect (p=${parseFloat(p_trt||1).toFixed(4)}). Differences attributable to field variability. Consider increasing replications.`;
+  doc.text(doc.splitTextToSize(interp, 188), 14, y); y += 16;
+
+  if (wxSummary) {
+    doc.setFont(undefined, 'bold'); doc.setFontSize(10);
+    doc.text('Growing Season Conditions', 14, y); y += 6;
+    doc.setFont(undefined, 'normal'); doc.setFontSize(9);
+    doc.text(`GDDs: ${wxSummary.totalGDD} °F · Precipitation: ${wxSummary.totalPrecip}" · Avg high: ${wxSummary.avgTmax}°F`, 14, y);
+  }
+
+  // Footer
+  doc.setFontSize(7); doc.setTextColor(150, 150, 150);
+  doc.text(`FarmPRISM – Plot Research & Integrated Statistical Management · ${new Date().toLocaleDateString()}`, 14, 272);
+
+  doc.save(`${trial.name.replace(/\s+/g,'_')}_${trial.season}_report.pdf`);
+}
+
+function createShareLink(trialId) {
+  const url = generateShareLink(trialId);
+  if (!url) { alert('Could not generate share link.'); return; }
+  const el = document.getElementById('share-result');
+  if (!el) { navigator.clipboard.writeText(url).then(() => alert('Link copied!')).catch(() => prompt('Copy:', url)); return; }
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input type="text" value="${url}" readonly style="flex:1;font-size:11px;font-family:var(--font-mono);background:var(--surface2);border:var(--border);border-radius:var(--radius-sm);padding:7px 10px;">
+      <button class="btn btn-secondary" onclick="navigator.clipboard.writeText('${url}').then(()=>alert('Copied!'))">📋 Copy</button>
+    </div>
+    <div class="info-box amber" style="margin-top:8px;font-size:11px;">Anyone with this link can view (but not edit) your trial data and results.</div>
+  `;
+}
+
+
+// ===== extensions.js =====
+// ============================================================
+// EXTENSIONS — Wires new feature modules into the main app
+// ============================================================
+
+// Extend showPage to handle new pages
+const _originalShowPage = showPage;
+showPage = function(id, btn) {
+  // Handle new pages
+  if (['weather','power','import'].includes(id)) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    const page = document.getElementById('page-' + id);
+    if (page) page.classList.add('active');
+    const activeBtn = btn || document.querySelector(`[data-page="${id}"]`);
+    if (activeBtn) activeBtn.classList.add('active');
+    if (id === 'weather') initWeatherPage();
+    if (id === 'power') initPowerPage();
+    if (id === 'import') initImportPage();
+    return;
+  }
+  _originalShowPage(id, btn);
+};
+
+// ── WEATHER PAGE ──────────────────────────────────────────────
+function initWeatherPage() {
+  populateAllSelectors();
+  if (currentCollectTrialId) {
+    const sel = document.getElementById('weather-trial-select');
+    if (sel) { sel.value = currentCollectTrialId; loadTrialWeather(); }
+  }
+}
+
+function loadTrialWeather() {
+  const id = parseInt(document.getElementById('weather-trial-select').value);
+  if (!id) return;
+  const trial = appState.trials.find(t => t.id === id);
+  if (!trial) return;
+
+  // Check if we have cached weather
+  const cached = (appState.weatherCache || {})[id];
+  if (cached) {
+    renderWeatherPanel('weather-panel', cached.daily, cached.summary, cached.forecast);
+    return;
+  }
+
+  // Show location input
+  document.getElementById('weather-location-row').style.display = 'grid';
+  document.getElementById('weather-fetch-btn-row').style.display = 'flex';
+
+  // Pre-fill location from trial field name
+  if (trial.field) document.getElementById('weather-location').value = trial.field;
+
+  // Pre-fill start date (April 1 of trial season or planting date)
+  const yr = trial.season || new Date().getFullYear();
+  document.getElementById('weather-start').value = `${yr}-04-01`;
+}
+
+async function fetchWeatherForTrial() {
+  const id = parseInt(document.getElementById('weather-trial-select').value);
+  const location = document.getElementById('weather-location').value.trim();
+  const startDate = document.getElementById('weather-start').value;
+  if (!id || !location || !startDate) { alert('Please select a trial and enter a location.'); return; }
+
+  const trial = appState.trials.find(t => t.id === id);
+  const loading = document.getElementById('weather-loading');
+  const panel = document.getElementById('weather-panel');
+  loading.style.display = 'flex';
+  panel.innerHTML = '';
+
+  try {
+    let lat, lng;
+    // Try parsing as coordinates first
+    const coordMatch = location.match(/(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)/);
+    if (coordMatch) {
+      lat = parseFloat(coordMatch[1]);
+      lng = parseFloat(coordMatch[2]);
+    } else if (trial.gpsPlots?.length) {
+      lat = trial.gpsPlots[0].lat;
+      lng = trial.gpsPlots[0].lng;
+    } else {
+      // Geocode the location string
+      const geo = await geocodeLocation(location);
+      lat = geo.lat; lng = geo.lng;
+    }
+
+    const endDate = new Date().toISOString().split('T')[0];
+    const [historical, forecast] = await Promise.all([
+      fetchTrialWeather(lat, lng, startDate, endDate),
+      fetchCurrentWeather(lat, lng).catch(() => null),
+    ]);
+
+    const daily = calcGDDs(historical);
+    const summary = summarizeWeather(daily);
+
+    // Cache it
+    if (!appState.weatherCache) appState.weatherCache = {};
+    appState.weatherCache[id] = { daily, summary, forecast, lat, lng, fetchedAt: new Date().toISOString() };
+    saveState();
+
+    loading.style.display = 'none';
+    renderWeatherPanel('weather-panel', daily, summary, forecast);
+
+  } catch (err) {
+    loading.style.display = 'none';
+    panel.innerHTML = `<div class="info-box" style="background:var(--red-50);color:var(--red-600);">
+      ❌ Could not fetch weather: ${err.message}
+      <br><br>Try entering coordinates directly (e.g. <strong>42.03, -93.62</strong> for Ames, Iowa).
+    </div>`;
+  }
+}
+
+// ── POWER ANALYSIS PAGE ───────────────────────────────────────
+function initPowerPage() {
+  renderPowerAnalysis('power-analysis-container');
+}
+
+// ── IMPORT PAGE ───────────────────────────────────────────────
+function initImportPage() {
+  populateAllSelectors();
+}
+
+function loadImportTrial() {
+  const id = parseInt(document.getElementById('import-trial-select').value);
+  if (!id) { document.getElementById('import-panel').innerHTML = ''; return; }
+  const trial = appState.trials.find(t => t.id === id);
+  if (!trial) return;
+  renderImportPanel('import-panel', trial, () => {});
+}
+
+// ── EXTEND ANALYZE PAGE — outlier flagging + rich reports ──
+const _originalRenderAnalysis = renderAnalysis;
+renderAnalysis = function(trial, result, data) {
+  _originalRenderAnalysis(trial, result, data);
+
+  // Outlier detection — inject above tabs
+  const obs = appState.observations.filter(o => o.trialId === trial.id && !o.excluded);
+  const outliers = detectOutliers(obs, trial.plots || []);
+  const tabsEl = document.querySelector('#page-analyze .tabs');
+  if (tabsEl) {
+    let outlierDiv = document.getElementById('outlier-panel');
+    if (!outlierDiv) {
+      outlierDiv = document.createElement('div');
+      outlierDiv.id = 'outlier-panel';
+      outlierDiv.style.marginBottom = '14px';
+      tabsEl.parentNode.insertBefore(outlierDiv, tabsEl);
+    }
+    if (outliers.length) renderOutlierPanel('outlier-panel', outliers);
+    else outlierDiv.innerHTML = '';
+  }
+
+  // Use rich report module
+  renderFullReportTab(trial, result, data);
+};
+
+// ── EXTEND COLLECT PAGE — photo capture in plot cards ─────────
+const _originalBuildPlotGrid = buildPlotGrid;
+buildPlotGrid = function(trial) {
+  _originalBuildPlotGrid(trial);
+  // Add photo counts to collected plot cards
+  setTimeout(() => {
+    (trial.plots || []).forEach(p => {
+      const photos = (appState.photos || []).filter(ph => ph.plotId === p.id && ph.trialId === trial.id);
+      if (photos.length) {
+        const card = document.querySelector(`.plot-card[data-plotid="${p.id}"]`);
+        // Cards don't have data-plotid yet — the count will show in enter tab
+      }
+    });
+  }, 100);
+};
+
+// Add photo UI to the data entry form
+const _originalOnObsPlotChange = onObsPlotChange;
+onObsPlotChange = function() {
+  _originalOnObsPlotChange();
+  const trial = appState.trials.find(t => t.id === currentCollectTrialId);
+  if (!trial) return;
+  const plotId = document.getElementById('obs-plot-select')?.value;
+  if (!plotId) return;
+
+  // Inject photo UI below the form if not already there
+  let photoSection = document.getElementById('photo-section');
+  const formCard = document.querySelector('#collect-enter .card');
+  if (!photoSection && formCard) {
+    photoSection = document.createElement('div');
+    photoSection.id = 'photo-section';
+    photoSection.style.marginTop = '12px';
+    formCard.appendChild(photoSection);
+  }
+  if (photoSection) {
+    const photos = (appState.photos || []).filter(p => p.plotId === plotId && p.trialId === trial.id);
+    photoSection.innerHTML = `
+      <div class="section-divider">Photos for this plot</div>
+      <div id="photos-${plotId}" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
+        ${photos.map(p => `
+          <div style="position:relative;display:inline-block;">
+            <img src="${p.base64}" style="width:80px;height:60px;object-fit:cover;border-radius:6px;border:var(--border);" alt="Plot photo">
+            ${p.lat ? `<div style="position:absolute;bottom:2px;left:2px;background:rgba(0,0,0,0.6);color:white;font-size:8px;padding:1px 3px;border-radius:2px;">📍</div>` : ''}
+            <button onclick="deletePhoto(${p.id})" style="position:absolute;top:2px;right:2px;background:rgba(0,0,0,0.6);color:white;border:none;border-radius:50%;width:16px;height:16px;font-size:10px;cursor:pointer;">×</button>
+          </div>
+        `).join('')}
+      </div>
+      <button class="btn btn-secondary" style="font-size:12px;" onclick="openPhotoCapture('${plotId}','photos-${plotId}')">
+        📷 Add photo
+      </button>
+    `;
+  }
+};
+
+// ── BENCHMARKING UI STUB ──────────────────────────────────────
+// Full implementation requires a backend API. This provides the UI
+// and explains what's needed to activate it.
+function renderBenchmarkingPanel(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title"><span class="cicon">🏆</span> Regional benchmarking</div>
+      <div class="info-box amber" style="margin-bottom:14px;">
+        <strong>Coming soon — requires backend setup.</strong>
+        Regional benchmarking pools anonymized trial data from participating farmers so you can compare your results to neighbors running similar trials. To activate this feature, you'll need to deploy a small API server (Node.js or Supabase) and connect it here.
+      </div>
+      <div style="font-size:13px;color:var(--text2);margin-bottom:14px;">
+        When enabled, this will show:
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;">
+        ${['Your yield vs county average', 'Best treatments in your region', 'Top performers by soil type', 'Year-over-year county trends'].map(item =>
+          `<div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;font-size:13px;color:var(--text2);">
+            <span style="opacity:0.4;">📊</span> ${item}
+          </div>`
+        ).join('')}
+      </div>
+      <div class="section-divider">Your local data (this device only)</div>
+      <div id="local-benchmark"></div>
+    </div>
+  `;
+  renderLocalBenchmark();
+}
+
+function renderLocalBenchmark() {
+  const el = document.getElementById('local-benchmark');
+  if (!el) return;
+  // Compute cross-trial statistics from local data
+  const completedTrials = appState.trials.filter(t => {
+    const obs = appState.observations.filter(o => o.trialId === t.id);
+    return obs.length >= (t.plots?.length || 4);
+  });
+  if (!completedTrials.length) {
+    el.innerHTML = `<div style="font-size:13px;color:var(--text2);">Complete at least one trial to see local statistics.</div>`;
+    return;
+  }
+  const rows = completedTrials.map(t => {
+    const obs = appState.observations.filter(o => o.trialId === t.id && !o.excluded);
+    const vals = obs.map(o => parseFloat(o.value));
+    const m = vals.reduce((a,b)=>a+b,0)/vals.length;
+    const best = obs.reduce((best, o) => parseFloat(o.value) > parseFloat(best?.value||0) ? o : best, obs[0]);
+    const bestPlot = t.plots?.find(p => p.id === best?.plotId);
+    return `<tr>
+      <td>${t.season}</td>
+      <td>${t.name}</td>
+      <td>${t.crop}</td>
+      <td>${m.toFixed(1)}</td>
+      <td>${bestPlot?.trtName || '–'}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `
+    <table class="data-table">
+      <thead><tr><th>Season</th><th>Trial</th><th>Crop</th><th>Grand mean</th><th>Top treatment</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+// ── TRIAL STATE — ensure new trials populate all page selectors ──
+const _origSaveTrial = typeof saveTrial !== 'undefined' ? saveTrial : null;
+
+function populateAllSelectors() {
+  const trialOptions = '<option value="">— Select trial —</option>' +
+    appState.trials.map(t => `<option value="${t.id}">${t.name} (${t.season})</option>`).join('');
+  ['collect-trial-select','analyze-trial-select','weather-trial-select','import-trial-select'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = trialOptions;
+  });
+  // Restore current selections
+  if (currentCollectTrialId) {
+    const cs = document.getElementById('collect-trial-select');
+    if (cs) cs.value = currentCollectTrialId;
+  }
+  if (currentAnalyzeTrialId) {
+    const as = document.getElementById('analyze-trial-select');
+    if (as) as.value = currentAnalyzeTrialId;
+  }
+}
+
+// Patch showPage to always repopulate selectors when switching pages
+const _origShowPageExt = showPage;
+showPage = function(id, btn) {
+  _origShowPageExt(id, btn);
+  // After any page switch, ensure all selectors are current
+  setTimeout(populateAllSelectors, 50);
+};
+
+// ── CHECK FOR SHARED TRIAL ON LOAD ────────────────────────────
+// DOMContentLoaded merged above
+
 </script>
 </body>
 </html>
