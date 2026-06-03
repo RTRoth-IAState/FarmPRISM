@@ -8,8 +8,9 @@
 <title>FieldStat – On-Farm Trial Platform</title>
 
 <!-- PWA manifest inline -->
+<!-- manifest.json for PWA -->
 <link rel="manifest" href="manifest.json">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxOTIgMTkyIj4KICA8cmVjdCB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIgcng9IjQwIiBmaWxsPSIjM0I2RDExIi8+CiAgPHRleHQgeD0iOTYiIHk9IjEzMCIgZm9udC1zaXplPSIxMTAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJzZXJpZiI+8J+MsTwvdGV4dD4KPC9zdmc+">
 
 <!-- Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -315,6 +316,15 @@ input,select,textarea,button{font-family:inherit;}
       </button>
       <button class="nav-btn" data-page="analyze" onclick="showPage('analyze',this)">
         <span class="icon">📊</span> <span>Analyze</span>
+      </button>
+      <button class="nav-btn" data-page="weather" onclick="showPage('weather',this)">
+        <span class="icon">🌤️</span> <span>Weather</span>
+      </button>
+      <button class="nav-btn" data-page="power" onclick="showPage('power',this)">
+        <span class="icon">⚡</span> <span>Power</span>
+      </button>
+      <button class="nav-btn" data-page="import" onclick="showPage('import',this)">
+        <span class="icon">📥</span> <span>Import</span>
       </button>
       <button class="nav-btn" data-page="seasons" onclick="showPage('seasons',this)">
         <span class="icon">📅</span> <span>Seasons</span>
@@ -765,6 +775,65 @@ input,select,textarea,button{font-family:inherit;}
       </div>
     </div>
 
+
+    <!-- ==================== WEATHER PAGE ==================== -->
+    <div class="page" id="page-weather">
+      <div class="page-header">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <div>
+            <div class="page-title">Weather & Growing Conditions</div>
+            <div class="page-sub">GDDs, rainfall, and temperature for your trial location</div>
+          </div>
+          <select id="weather-trial-select" style="font-size:13px;padding:7px 10px;border:var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);" onchange="loadTrialWeather()">
+            <option value="">— Select trial —</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row col2" id="weather-location-row" style="display:none;">
+        <div class="form-group">
+          <label class="form-label">Trial location (city, state or coordinates)</label>
+          <input type="text" id="weather-location" placeholder="e.g. Ames, Iowa or 42.03,-93.62">
+          <span class="form-hint">Used to fetch historical weather from Open-Meteo (free, no account needed)</span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Season start date</label>
+          <input type="date" id="weather-start">
+        </div>
+      </div>
+      <div id="weather-fetch-btn-row" style="display:none;" class="btn-row">
+        <button class="btn btn-primary" onclick="fetchWeatherForTrial()">🌤️ Fetch weather data</button>
+      </div>
+      <div id="weather-loading" style="display:none;" class="webr-status">
+        <div class="spinner"></div> Fetching weather from Open-Meteo...
+      </div>
+      <div id="weather-panel"></div>
+    </div>
+
+    <!-- ==================== POWER ANALYSIS PAGE ==================== -->
+    <div class="page" id="page-power">
+      <div class="page-header">
+        <div class="page-title">Power Analysis</div>
+        <div class="page-sub">Calculate how many replications you need before designing your trial</div>
+      </div>
+      <div id="power-analysis-container"></div>
+    </div>
+
+    <!-- ==================== IMPORT PAGE ==================== -->
+    <div class="page" id="page-import">
+      <div class="page-header">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <div>
+            <div class="page-title">Import Yield Monitor Data</div>
+            <div class="page-sub">John Deere, Ag Leader, Case IH, or generic CSV</div>
+          </div>
+          <select id="import-trial-select" style="font-size:13px;padding:7px 10px;border:var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);" onchange="loadImportTrial()">
+            <option value="">— Select trial —</option>
+          </select>
+        </div>
+      </div>
+      <div id="import-panel"></div>
+    </div>
+
   </div><!-- /content -->
 </div><!-- /app -->
 
@@ -802,6 +871,10 @@ input,select,textarea,button{font-family:inherit;}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="js/weather.js"></script>
+<script src="js/yield-import.js"></script>
+<script src="js/features.js"></script>
+<script src="js/extensions.js"></script>
 <script src="app.js"></script>
 
 <!-- PWA Service Worker registration -->
