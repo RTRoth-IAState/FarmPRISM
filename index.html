@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="description" content="FieldStat - On-Farm Trial Planning, Data Collection & Statistical Analysis">
+<meta name="theme-color" content="#2d5a1b">
+<title>FieldStat – On-Farm Trial Platform</title>
+
+<!-- PWA manifest inline -->
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --green-50:#EAF3DE;--green-100:#C0DD97;--green-200:#97C459;--green-400:#639922;
+  --green-600:#3B6D11;--green-800:#27500A;--green-900:#173404;
+  --amber-50:#FAEEDA;--amber-100:#FAC775;--amber-400:#BA7517;--amber-800:#633806;
+  --teal-50:#E1F5EE;--teal-100:#9FE1CB;--teal-600:#0F6E56;--teal-800:#085041;
+  --blue-50:#E6F1FB;--blue-100:#B5D4F4;--blue-200:#85B7EB;--blue-600:#185FA5;--blue-800:#0C447C;
+  --coral-50:#FAECE7;--coral-200:#F0997B;--coral-600:#993C1D;
+  --gray-50:#F1EFE8;--gray-100:#D3D1C7;--gray-400:#888780;--gray-600:#5F5E5A;
+  --purple-50:#EEEDFE;--purple-600:#534AB7;--purple-800:#3C3489;
+  --red-50:#FCEBEB;--red-600:#A32D2D;
+  --font-main:'DM Sans',system-ui,sans-serif;
+  --font-mono:'DM Mono',monospace;
+  --radius:10px;--radius-sm:6px;
+  --border:1px solid rgba(0,0,0,0.1);
+  --shadow:0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md:0 4px 12px rgba(0,0,0,0.1);
+  --bg:#f8f7f3;--surface:#ffffff;--surface2:#f4f2ec;
+  --text:#1a1a18;--text2:#5a5955;--text3:#8a8880;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#141412;--surface:#1e1d1a;--surface2:#252420;
+    --text:#f0ede6;--text2:#a0988c;--text3:#706860;
+    --border:1px solid rgba(255,255,255,0.1);
+  }
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:var(--font-main);background:var(--bg);color:var(--text);min-height:100vh;}
+input,select,textarea,button{font-family:inherit;}
+
+/* LAYOUT */
+.app{display:flex;flex-direction:column;min-height:100vh;}
+.topbar{
+  position:sticky;top:0;z-index:100;
+  background:var(--surface);border-bottom:var(--border);
+  display:flex;align-items:center;gap:12px;padding:0 16px;height:54px;
+}
+.logo{display:flex;align-items:center;gap:8px;text-decoration:none;}
+.logo-mark{width:30px;height:30px;background:var(--green-600);border-radius:7px;display:flex;align-items:center;justify-content:center;color:white;font-size:16px;}
+.logo-text{font-size:15px;font-weight:500;color:var(--text);}
+.spacer{flex:1;}
+.nav{display:flex;gap:2px;}
+.nav-btn{
+  display:flex;align-items:center;gap:6px;padding:6px 12px;
+  border:none;background:none;cursor:pointer;border-radius:var(--radius-sm);
+  font-size:13px;color:var(--text2);transition:all 0.15s;white-space:nowrap;
+}
+.nav-btn:hover{background:var(--surface2);color:var(--text);}
+.nav-btn.active{background:var(--green-50);color:var(--green-800);font-weight:500;}
+.nav-btn .icon{font-size:15px;}
+.hamburger{display:none;background:none;border:none;cursor:pointer;padding:6px;color:var(--text2);font-size:20px;}
+.offline-badge{
+  display:none;font-size:11px;padding:3px 8px;border-radius:100px;
+  background:var(--amber-50);color:var(--amber-800);font-weight:500;
+}
+.offline-badge.show{display:block;}
+
+/* MOBILE NAV */
+@media(max-width:680px){
+  .nav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:200;
+    flex-direction:row;background:var(--surface);border-top:var(--border);
+    padding:6px 4px;justify-content:space-around;}
+  .nav.mobile-show{display:flex;}
+  .nav-btn{flex-direction:column;gap:2px;padding:6px 8px;font-size:10px;}
+  .nav-btn .icon{font-size:20px;}
+  .hamburger{display:block;}
+  body{padding-bottom:72px;}
+  .topbar .nav{display:none;}
+}
+
+/* CONTENT */
+.content{flex:1;max-width:920px;margin:0 auto;width:100%;padding:20px 16px;}
+.page{display:none;}
+.page.active{display:block;}
+.page-header{margin-bottom:20px;}
+.page-title{font-size:20px;font-weight:500;}
+.page-sub{font-size:13px;color:var(--text2);margin-top:3px;}
+
+/* CARDS */
+.card{background:var(--surface);border:var(--border);border-radius:var(--radius);padding:16px 20px;margin-bottom:14px;box-shadow:var(--shadow);}
+.card-title{font-size:14px;font-weight:500;margin-bottom:12px;display:flex;align-items:center;gap:8px;color:var(--text);}
+.card-title .cicon{color:var(--green-600);font-size:16px;}
+
+/* FORMS */
+.form-row{display:grid;gap:12px;margin-bottom:12px;}
+.form-row.col2{grid-template-columns:1fr 1fr;}
+.form-row.col3{grid-template-columns:1fr 1fr 1fr;}
+.form-row.col4{grid-template-columns:1fr 1fr 1fr 1fr;}
+.form-row.col1{grid-template-columns:1fr;}
+.form-group{display:flex;flex-direction:column;gap:5px;}
+.form-label{font-size:12px;color:var(--text2);font-weight:500;}
+.form-group input,.form-group select,.form-group textarea{
+  background:var(--surface2);border:var(--border);border-radius:var(--radius-sm);
+  padding:8px 10px;font-size:14px;color:var(--text);
+  transition:border-color 0.15s;
+}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{
+  outline:none;border-color:var(--green-600);
+}
+.form-group textarea{resize:vertical;min-height:70px;}
+.form-hint{font-size:11px;color:var(--text3);margin-top:3px;}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;cursor:pointer;transition:all 0.15s;border:none;font-family:inherit;}
+.btn-primary{background:var(--green-600);color:white;}
+.btn-primary:hover{background:var(--green-800);}
+.btn-secondary{background:var(--surface2);color:var(--text);border:var(--border);}
+.btn-secondary:hover{background:var(--surface);border-color:var(--text3);}
+.btn-danger{background:var(--red-50);color:var(--red-600);border:1px solid var(--red-600);}
+.btn-icon{background:none;border:none;cursor:pointer;padding:4px;color:var(--text2);border-radius:4px;font-size:15px;display:inline-flex;align-items:center;}
+.btn-icon:hover{background:var(--surface2);color:var(--text);}
+.btn-add{display:flex;align-items:center;gap:6px;font-family:inherit;font-size:13px;cursor:pointer;background:none;border:1px dashed var(--text3);color:var(--text2);border-radius:var(--radius-sm);padding:8px 14px;width:100%;justify-content:center;transition:all 0.15s;margin-top:8px;}
+.btn-add:hover{background:var(--surface2);color:var(--text);border-color:var(--text2);}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;}
+
+/* BADGES */
+.badge{display:inline-block;font-size:11px;font-weight:500;padding:2px 8px;border-radius:100px;}
+.badge-green{background:var(--green-50);color:var(--green-800);}
+.badge-amber{background:var(--amber-50);color:var(--amber-800);}
+.badge-blue{background:var(--blue-50);color:var(--blue-800);}
+.badge-gray{background:var(--gray-50);color:var(--gray-600);}
+.badge-purple{background:var(--purple-50);color:var(--purple-800);}
+.badge-coral{background:var(--coral-50);color:var(--coral-600);}
+
+/* INFO BOX */
+.info-box{padding:10px 14px;border-radius:var(--radius-sm);font-size:12px;margin-bottom:12px;}
+.info-box.blue{background:var(--blue-50);color:var(--blue-800);}
+.info-box.amber{background:var(--amber-50);color:var(--amber-800);}
+.info-box.green{background:var(--green-50);color:var(--green-800);}
+.info-box.teal{background:var(--teal-50);color:var(--teal-800);}
+
+/* METRICS */
+.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-bottom:16px;}
+.metric-card{background:var(--surface2);border-radius:var(--radius-sm);padding:12px 14px;}
+.metric-label{font-size:11px;color:var(--text2);margin-bottom:4px;}
+.metric-value{font-size:22px;font-weight:500;}
+.metric-unit{font-size:12px;color:var(--text2);}
+
+/* TABLES */
+.data-table{width:100%;border-collapse:collapse;font-size:13px;}
+.data-table th{text-align:left;padding:8px 10px;border-bottom:var(--border);color:var(--text2);font-weight:500;font-size:12px;}
+.data-table td{padding:8px 10px;border-bottom:var(--border);color:var(--text);}
+.data-table tr:last-child td{border-bottom:none;}
+.data-table tr:hover td{background:var(--surface2);}
+.data-table.mono td{font-family:var(--font-mono);font-size:12px;}
+.data-table.mono td:first-child{font-family:var(--font-main);}
+
+/* FIELD MAP */
+.field-map-wrap{overflow-x:auto;}
+.field-map{display:inline-grid;gap:3px;min-width:100%;}
+.plot-cell{
+  min-width:70px;height:44px;border-radius:5px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  font-size:10px;font-weight:500;color:white;cursor:pointer;
+  transition:opacity 0.15s;padding:3px;
+  font-family:var(--font-mono);position:relative;
+}
+.plot-cell:hover{opacity:0.8;transform:scale(1.02);}
+.plot-cell .plot-id{font-size:9px;opacity:0.75;}
+.plot-cell .plot-trt{font-size:10px;font-weight:600;}
+.plot-cell .wp-badge{
+  position:absolute;top:2px;right:2px;
+  background:rgba(255,255,255,0.3);border-radius:3px;
+  font-size:8px;padding:1px 3px;
+}
+.map-label{
+  font-size:11px;color:var(--text2);font-weight:500;
+  display:flex;align-items:center;justify-content:center;
+  padding:4px;
+}
+.strip-label{
+  font-size:10px;color:var(--text2);writing-mode:vertical-rl;
+  transform:rotate(180deg);padding:4px;display:flex;align-items:center;
+}
+
+/* DATA COLLECTION */
+.plot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;}
+.plot-card{
+  background:var(--surface);border:var(--border);border-radius:var(--radius);
+  padding:12px;cursor:pointer;transition:all 0.15s;
+}
+.plot-card:hover{border-color:var(--text2);box-shadow:var(--shadow-md);}
+.plot-card.collected{border-color:var(--green-600);background:var(--green-50);}
+.plot-card.collected .pc-val{color:var(--green-800);}
+
+/* PROGRESS */
+.progress-wrap{background:var(--surface2);border-radius:100px;height:6px;margin:8px 0 16px;}
+.progress-fill{height:6px;border-radius:100px;background:var(--green-600);transition:width 0.3s;}
+
+/* TABS */
+.tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;}
+.tab-btn{padding:6px 14px;border-radius:100px;border:var(--border);background:none;font-family:inherit;font-size:13px;cursor:pointer;color:var(--text2);transition:all 0.15s;}
+.tab-btn.active{background:var(--green-600);color:white;border-color:var(--green-600);}
+.tab-btn:hover:not(.active){background:var(--surface2);}
+
+/* ANALYSIS */
+.bar-chart-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+.bar-label{font-size:12px;color:var(--text2);min-width:90px;text-align:right;}
+.bar-track{flex:1;background:var(--surface2);border-radius:100px;height:26px;overflow:hidden;}
+.bar-fill{height:100%;border-radius:100px;display:flex;align-items:center;padding:0 10px;transition:width 0.7s ease;}
+.bar-val{font-size:11px;font-weight:500;color:white;font-family:var(--font-mono);}
+.bar-sig{font-size:12px;color:var(--text2);margin-left:6px;min-width:14px;}
+.anova-sig{color:var(--green-600);font-weight:600;}
+.anova-ns{color:var(--text3);}
+
+/* GPS MAP */
+#leaflet-map{height:320px;border-radius:var(--radius);overflow:hidden;border:var(--border);}
+.map-controls{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
+
+/* MODAL */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:500;align-items:center;justify-content:center;padding:16px;}
+.modal-overlay.open{display:flex;}
+.modal-box{background:var(--surface);border-radius:var(--radius);padding:20px;width:100%;max-width:440px;box-shadow:var(--shadow-md);max-height:90vh;overflow-y:auto;}
+.modal-title{font-size:16px;font-weight:500;margin-bottom:14px;}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;}
+
+/* SEASON SWITCHER */
+.season-pill{display:flex;align-items:center;gap:6px;background:var(--surface2);border:var(--border);border-radius:100px;padding:5px 12px;cursor:pointer;font-size:13px;color:var(--text);transition:all 0.15s;}
+.season-pill:hover{background:var(--surface);}
+
+/* TREATMENT ITEMS */
+.trt-item{display:flex;align-items:center;gap:8px;background:var(--surface2);border-radius:var(--radius-sm);padding:8px 10px;border:var(--border);margin-bottom:6px;}
+.trt-swatch{width:12px;height:12px;border-radius:3px;flex-shrink:0;}
+.trt-name{flex:1;font-size:13px;}
+.trt-rate{font-size:12px;color:var(--text2);font-family:var(--font-mono);}
+
+/* STEPPER */
+.stepper-row{display:flex;align-items:center;gap:8px;}
+.stepper-btn{background:var(--surface2);border:var(--border);border-radius:var(--radius-sm);width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:20px;color:var(--text);flex-shrink:0;transition:all 0.15s;}
+.stepper-btn:hover{background:var(--surface);}
+.big-input{font-size:24px!important;font-weight:500!important;text-align:center;padding:10px!important;font-family:var(--font-mono)!important;}
+
+/* TRIAL LIST */
+.trial-item{display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--surface);border:var(--border);border-radius:var(--radius);margin-bottom:8px;cursor:pointer;transition:all 0.15s;box-shadow:var(--shadow);}
+.trial-item:hover{box-shadow:var(--shadow-md);transform:translateY(-1px);}
+.trial-icon{width:38px;height:38px;border-radius:8px;background:var(--green-50);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}
+.trial-info{flex:1;}
+.trial-name{font-size:14px;font-weight:500;}
+.trial-meta{font-size:12px;color:var(--text2);margin-top:2px;}
+
+/* LOADING */
+.webr-status{font-size:12px;color:var(--text2);display:flex;align-items:center;gap:6px;padding:10px;}
+.spinner{width:14px;height:14px;border:2px solid var(--green-100);border-top-color:var(--green-600);border-radius:50%;animation:spin 0.8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* CHART CANVAS */
+.chart-wrap{position:relative;width:100%;margin:12px 0;}
+
+/* SEASON COMPARISON */
+.season-chart-wrap{height:280px;position:relative;}
+
+/* RESPONSIVE */
+@media(max-width:600px){
+  .form-row.col2,.form-row.col3,.form-row.col4{grid-template-columns:1fr;}
+  .metric-grid{grid-template-columns:repeat(2,1fr);}
+  .content{padding:16px 12px;}
+}
+
+/* SECTION DIVIDER */
+.section-divider{font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:20px 0 10px;display:flex;align-items:center;gap:8px;}
+.section-divider::after{content:'';flex:1;height:1px;background:var(--surface2);}
+
+/* FACTOR SECTION */
+.factor-section{background:var(--surface2);border-radius:var(--radius-sm);padding:12px;margin-bottom:10px;border:var(--border);}
+.factor-title{font-size:13px;font-weight:500;margin-bottom:10px;display:flex;align-items:center;gap:6px;}
+.factor-badge{width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:white;flex-shrink:0;}
+
+/* REPORT */
+.report-section{margin-bottom:24px;}
+.report-section h3{font-size:14px;font-weight:500;margin-bottom:10px;padding-bottom:6px;border-bottom:var(--border);}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <a class="logo" href="#">
+      <div class="logo-mark">🌱</div>
+      <span class="logo-text">FieldStat</span>
+    </a>
+    <div class="offline-badge" id="offline-badge">Offline</div>
+    <div class="spacer"></div>
+    <nav class="nav mobile-show" id="main-nav">
+      <button class="nav-btn active" data-page="trials" onclick="showPage('trials',this)">
+        <span class="icon">🗂️</span> <span>Trials</span>
+      </button>
+      <button class="nav-btn" data-page="design" onclick="showPage('design',this)">
+        <span class="icon">📐</span> <span>Design</span>
+      </button>
+      <button class="nav-btn" data-page="collect" onclick="showPage('collect',this)">
+        <span class="icon">📋</span> <span>Collect</span>
+      </button>
+      <button class="nav-btn" data-page="analyze" onclick="showPage('analyze',this)">
+        <span class="icon">📊</span> <span>Analyze</span>
+      </button>
+      <button class="nav-btn" data-page="seasons" onclick="showPage('seasons',this)">
+        <span class="icon">📅</span> <span>Seasons</span>
+      </button>
+    </nav>
+    <button class="hamburger" onclick="toggleMobileNav()">☰</button>
+  </div>
+
+  <div class="content">
+
+    <!-- ==================== TRIALS PAGE ==================== -->
+    <div class="page active" id="page-trials">
+      <div class="page-header">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div class="page-title">My Trials</div>
+            <div class="page-sub" id="season-label">Loading...</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button class="season-pill" onclick="openSeasonModal()">
+              <span id="current-season-label">2025</span> ▾
+            </button>
+            <button class="btn btn-primary" onclick="showPage('design')">+ New Trial</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="metric-grid" id="trials-metrics">
+        <div class="metric-card"><div class="metric-label">Active trials</div><div class="metric-value" id="m-trials">–</div></div>
+        <div class="metric-card"><div class="metric-label">Total plots</div><div class="metric-value" id="m-plots">–</div></div>
+        <div class="metric-card"><div class="metric-label">Observations</div><div class="metric-value" id="m-obs">–</div></div>
+        <div class="metric-card"><div class="metric-label">Complete</div><div class="metric-value" id="m-complete">–</div></div>
+      </div>
+
+      <div class="section-divider">Trials this season</div>
+      <div id="trial-list"></div>
+
+      <button class="btn-add" onclick="showPage('design')">+ Create new trial</button>
+    </div>
+
+    <!-- ==================== DESIGN PAGE ==================== -->
+    <div class="page" id="page-design">
+      <div class="page-header">
+        <div class="page-title">Design a Trial</div>
+        <div class="page-sub">Configure treatments, experimental design, and field layout</div>
+      </div>
+
+      <!-- Step indicator -->
+      <div style="display:flex;gap:8px;margin-bottom:20px;overflow-x:auto;padding-bottom:4px;">
+        <div class="step-indicator active" id="step-1-ind">1 · Basics</div>
+        <div style="flex:1;height:2px;background:var(--surface2);align-self:center;margin:0 4px;min-width:16px;"></div>
+        <div class="step-indicator" id="step-2-ind">2 · Design</div>
+        <div style="flex:1;height:2px;background:var(--surface2);align-self:center;margin:0 4px;min-width:16px;"></div>
+        <div class="step-indicator" id="step-3-ind">3 · Treatments</div>
+        <div style="flex:1;height:2px;background:var(--surface2);align-self:center;margin:0 4px;min-width:16px;"></div>
+        <div class="step-indicator" id="step-4-ind">4 · Field Map</div>
+        <div style="flex:1;height:2px;background:var(--surface2);align-self:center;margin:0 4px;min-width:16px;"></div>
+        <div class="step-indicator" id="step-5-ind">5 · GPS</div>
+      </div>
+      <style>
+      .step-indicator{font-size:12px;font-weight:500;color:var(--text2);white-space:nowrap;padding:4px 0;}
+      .step-indicator.active{color:var(--green-600);}
+      </style>
+
+      <div id="design-step-1">
+        <div class="card">
+          <div class="card-title"><span class="cicon">📋</span> Trial basics</div>
+          <div class="form-row col2">
+            <div class="form-group"><label class="form-label">Trial name *</label><input type="text" id="d-name" placeholder="e.g. N Rate Study 2025"></div>
+            <div class="form-group"><label class="form-label">Crop *</label>
+              <select id="d-crop">
+                <option>Corn</option><option>Soybeans</option><option>Wheat</option>
+                <option>Sorghum</option><option>Cotton</option><option>Canola</option>
+                <option>Sunflower</option><option>Other</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row col2">
+            <div class="form-group"><label class="form-label">Field</label><input type="text" id="d-field" placeholder="North 40"></div>
+            <div class="form-group"><label class="form-label">Season / Year</label><input type="text" id="d-season" placeholder="2025"></div>
+          </div>
+          <div class="form-row col1">
+            <div class="form-group"><label class="form-label">Objective / hypothesis</label><textarea id="d-objective" placeholder="What question are you trying to answer?"></textarea></div>
+          </div>
+          <div class="form-row col2">
+            <div class="form-group"><label class="form-label">Primary variable</label>
+              <select id="d-variable">
+                <option>Grain yield (bu/ac)</option>
+                <option>Grain yield (lbs/ac)</option>
+                <option>Plant height (in)</option>
+                <option>Stand count (plants/ac)</option>
+                <option>Canopy cover (%)</option>
+                <option>Protein content (%)</option>
+                <option>Test weight (lb/bu)</option>
+                <option>Custom...</option>
+              </select>
+            </div>
+            <div class="form-group"><label class="form-label">Custom variable name</label><input type="text" id="d-variable-custom" placeholder="e.g. NDVI score"></div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" onclick="designStep(2)">Next: Design type →</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="design-step-2" style="display:none;">
+        <div class="card">
+          <div class="card-title"><span class="cicon">📐</span> Experimental design</div>
+
+          <div class="form-row col2">
+            <div class="form-group">
+              <label class="form-label">Design type</label>
+              <select id="d-design" onchange="onDesignChange()">
+                <option value="rcbd">RCBD — Randomized Complete Block</option>
+                <option value="crd">CRD — Completely Randomized</option>
+                <option value="latin">Latin Square</option>
+                <option value="strip">Strip Trial</option>
+                <option value="split">Split-Plot</option>
+                <option value="splitsplit">Split-Split-Plot</option>
+              </select>
+            </div>
+            <div class="form-group" id="reps-group">
+              <label class="form-label">Blocks / Replications</label>
+              <select id="d-reps" onchange="refreshDesignPreview()">
+                <option value="3">3</option><option value="4" selected>4</option>
+                <option value="5">5</option><option value="6">6</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="design-description" class="info-box blue" style="margin-bottom:12px;"></div>
+
+          <!-- Split-plot factor setup -->
+          <div id="split-setup" style="display:none;">
+            <div class="factor-section">
+              <div class="factor-title"><div class="factor-badge" style="background:var(--blue-600);">W</div> Whole-plot factor (Main Plots)</div>
+              <div class="form-row col2">
+                <div class="form-group"><label class="form-label">Factor name</label><input type="text" id="wp-factor-name" placeholder="e.g. Tillage method" value="Tillage"></div>
+                <div class="form-group"><label class="form-label">Number of levels</label><select id="wp-levels" onchange="renderWPLevels()"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div>
+              </div>
+              <div id="wp-levels-list"></div>
+            </div>
+            <div class="factor-section">
+              <div class="factor-title"><div class="factor-badge" style="background:var(--green-600);">S</div> Sub-plot factor (Sub Plots)</div>
+              <div class="form-row col2">
+                <div class="form-group"><label class="form-label">Factor name</label><input type="text" id="sp-factor-name" placeholder="e.g. Nitrogen rate" value="N Rate"></div>
+                <div class="form-group"><label class="form-label">Number of levels</label><select id="sp-levels" onchange="renderSPLevels()"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div>
+              </div>
+              <div id="sp-levels-list"></div>
+            </div>
+          </div>
+
+          <!-- Split-split extra factor -->
+          <div id="splitsplit-setup" style="display:none;">
+            <div class="factor-section">
+              <div class="factor-title"><div class="factor-badge" style="background:var(--purple-600);">SS</div> Sub-sub-plot factor</div>
+              <div class="form-row col2">
+                <div class="form-group"><label class="form-label">Factor name</label><input type="text" id="ssp-factor-name" placeholder="e.g. Fungicide timing" value="Fungicide"></div>
+                <div class="form-group"><label class="form-label">Number of levels</label><select id="ssp-levels" onchange="renderSSPLevels()"><option value="2" selected>2</option><option value="3">3</option></select></div>
+              </div>
+              <div id="ssp-levels-list"></div>
+            </div>
+          </div>
+
+          <!-- Strip trial setup -->
+          <div id="strip-setup" style="display:none;">
+            <div class="factor-section">
+              <div class="factor-title"><div class="factor-badge" style="background:var(--blue-600);">→</div> Strip Factor A (rows)</div>
+              <div class="form-row col2">
+                <div class="form-group"><label class="form-label">Factor name</label><input type="text" id="strip-a-name" placeholder="e.g. Nitrogen rate" value="N Rate"></div>
+                <div class="form-group"><label class="form-label">Levels</label><select id="strip-a-levels" onchange="renderStripA()"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div>
+              </div>
+              <div id="strip-a-list"></div>
+            </div>
+            <div class="factor-section">
+              <div class="factor-title"><div class="factor-badge" style="background:var(--green-600);">↑</div> Strip Factor B (columns)</div>
+              <div class="form-row col2">
+                <div class="form-group"><label class="form-label">Factor name</label><input type="text" id="strip-b-name" placeholder="e.g. Population" value="Population"></div>
+                <div class="form-group"><label class="form-label">Levels</label><select id="strip-b-levels" onchange="renderStripB()"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option></select></div>
+              </div>
+              <div id="strip-b-list"></div>
+            </div>
+          </div>
+
+          <div class="form-row col2" style="margin-top:12px;">
+            <div class="form-group"><label class="form-label">Plot length (ft)</label><input type="number" id="d-plot-len" value="600"></div>
+            <div class="form-group"><label class="form-label">Plot width (rows)</label><input type="number" id="d-plot-rows" value="4"></div>
+          </div>
+
+          <div class="btn-row">
+            <button class="btn btn-secondary" onclick="designStep(1)">← Back</button>
+            <button class="btn btn-primary" onclick="designStep(3)">Next: Treatments →</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="design-step-3" style="display:none;">
+        <div class="card">
+          <div class="card-title"><span class="cicon">🧪</span> Treatments</div>
+          <div id="treatment-setup-hint" class="info-box blue" style="margin-bottom:12px;"></div>
+          <div id="treatment-inputs"></div>
+          <button class="btn-add" onclick="addTreatmentInput()">+ Add treatment</button>
+          <div class="btn-row" style="margin-top:14px;">
+            <button class="btn btn-secondary" onclick="designStep(2)">← Back</button>
+            <button class="btn btn-primary" onclick="designStep(4)">Next: Field Map →</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="design-step-4" style="display:none;">
+        <div class="card">
+          <div class="card-title"><span class="cicon">🗺️</span> Field map preview</div>
+          <div id="field-map-container"></div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--text2);">
+            <span>Total plots: <strong id="total-plots" style="color:var(--text)">–</strong></span>
+            <span>Trial area: <strong id="trial-area" style="color:var(--text)">–</strong></span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;" id="map-legend"></div>
+          <div class="btn-row" style="margin-top:14px;">
+            <button class="btn btn-secondary" onclick="designStep(3)">← Back</button>
+            <button class="btn btn-primary" onclick="designStep(5)">Next: GPS Setup →</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="design-step-5" style="display:none;">
+        <div class="card">
+          <div class="card-title"><span class="cicon">📍</span> GPS plot layout (optional)</div>
+          <div class="info-box blue">Click on the map to set the origin corner of your trial. Then use the controls to orient and size the plot grid to match your field.</div>
+          <div class="map-controls">
+            <button class="btn btn-secondary" id="btn-locate" onclick="locateUser()">📍 My location</button>
+            <button class="btn btn-secondary" onclick="toggleDrawMode()">✏️ Draw plots</button>
+            <button class="btn btn-secondary" onclick="clearMapPlots()">🗑️ Clear</button>
+            <select id="map-basemap" onchange="changeBasemap(this.value)" style="font-size:13px;padding:6px 10px;border:var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);">
+              <option value="satellite">Satellite</option>
+              <option value="street">Street</option>
+            </select>
+          </div>
+          <div id="leaflet-map"></div>
+          <div id="gps-plot-info" style="font-size:12px;color:var(--text2);margin-top:8px;"></div>
+          <div class="btn-row" style="margin-top:14px;">
+            <button class="btn btn-secondary" onclick="designStep(4)">← Back</button>
+            <button class="btn btn-primary" onclick="saveTrial()">✅ Save trial & begin collecting →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== COLLECT PAGE ==================== -->
+    <div class="page" id="page-collect">
+      <div class="page-header">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <div>
+            <div class="page-title">Collect Data</div>
+            <div class="page-sub" id="collect-trial-name">Select a trial below</div>
+          </div>
+          <select id="collect-trial-select" style="font-size:13px;padding:7px 10px;border:var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);" onchange="loadCollectTrial()">
+            <option value="">— Select trial —</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="collect-content" style="display:none;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <span style="font-size:13px;color:var(--text2);" id="collect-progress-label">0 of 0 plots</span>
+          <span class="badge badge-green" id="collect-pct-badge">0%</span>
+        </div>
+        <div class="progress-wrap"><div class="progress-fill" id="collect-progress-fill" style="width:0%"></div></div>
+
+        <div class="tabs">
+          <button class="tab-btn active" onclick="setCollectTab('grid',this)">Plot grid</button>
+          <button class="tab-btn" onclick="setCollectTab('enter',this)">Enter data</button>
+          <button class="tab-btn" onclick="setCollectTab('review',this)">Review</button>
+        </div>
+
+        <div id="collect-grid">
+          <div class="plot-grid" id="plot-grid-container"></div>
+        </div>
+
+        <div id="collect-enter" style="display:none;">
+          <div class="card">
+            <div class="card-title"><span class="cicon">📋</span> Record observation</div>
+            <div class="form-row col2">
+              <div class="form-group">
+                <label class="form-label">Plot</label>
+                <select id="obs-plot-select" onchange="onObsPlotChange()"></select>
+              </div>
+              <div class="form-group"><label class="form-label">Date</label><input type="date" id="obs-date"></div>
+            </div>
+            <div id="obs-plot-info" class="info-box green" style="margin-bottom:12px;display:none;"></div>
+            <div style="margin-bottom:12px;">
+              <div class="form-label" style="margin-bottom:8px;" id="obs-var-label">Yield (bu/ac)</div>
+              <div class="stepper-row">
+                <button class="stepper-btn" onclick="stepObs(-1)">−</button>
+                <input type="number" class="big-input" id="obs-value" value="0" step="0.1" style="flex:1;">
+                <button class="stepper-btn" onclick="stepObs(1)">+</button>
+              </div>
+            </div>
+            <div class="form-row col2">
+              <div class="form-group"><label class="form-label">Secondary measurement</label><input type="number" id="obs-sec" placeholder="e.g. moisture %"></div>
+              <div class="form-group"><label class="form-label">Quality (1-5)</label>
+                <select id="obs-quality"><option value="">—</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select>
+              </div>
+            </div>
+            <div class="form-row col1">
+              <div class="form-group"><label class="form-label">Notes</label><textarea id="obs-notes" placeholder="Any observations..."></textarea></div>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-primary" onclick="saveObservation()">💾 Save</button>
+              <button class="btn btn-secondary" onclick="saveAndNext()">Save & next →</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="collect-review" style="display:none;">
+          <div class="card">
+            <div class="card-title"><span class="cicon">📊</span> Recorded data</div>
+            <div style="overflow-x:auto;">
+              <table class="data-table" id="review-table">
+                <thead><tr><th>Plot</th><th>Block</th><th>Treatment</th><th>Value</th><th>Date</th><th></th></tr></thead>
+                <tbody id="review-body"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" onclick="showPage('analyze')">📊 Run analysis →</button>
+            <button class="btn btn-secondary" onclick="exportCSV()">⬇️ Export CSV</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== ANALYZE PAGE ==================== -->
+    <div class="page" id="page-analyze">
+      <div class="page-header">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <div>
+            <div class="page-title">Statistical Analysis</div>
+            <div class="page-sub" id="analyze-trial-name">Select a trial</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <select id="analyze-trial-select" style="font-size:13px;padding:7px 10px;border:var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);" onchange="loadAnalysisTrial()">
+              <option value="">— Select trial —</option>
+            </select>
+            <button class="btn btn-secondary" onclick="runAnalysis()">▶ Run analysis</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="webr-status" class="webr-status"><div class="spinner"></div> Loading R engine (WebR)...</div>
+
+      <div id="analyze-content" style="display:none;">
+        <div class="metric-grid" id="analyze-metrics"></div>
+
+        <div id="analyze-insight" class="info-box teal" style="margin-bottom:16px;display:none;"></div>
+
+        <div class="tabs">
+          <button class="tab-btn active" onclick="setAnalyzeTab('means',this)">Means & ranking</button>
+          <button class="tab-btn" onclick="setAnalyzeTab('anova',this)">ANOVA table</button>
+          <button class="tab-btn" onclick="setAnalyzeTab('econ',this)">Economics</button>
+          <button class="tab-btn" onclick="setAnalyzeTab('report',this)">Report</button>
+        </div>
+
+        <div id="atab-means">
+          <div class="card">
+            <div class="card-title"><span class="cicon">📊</span> Treatment means <span style="font-size:12px;font-weight:400;color:var(--text2);">(Tukey HSD grouping)</span></div>
+            <div id="means-bars"></div>
+            <div class="info-box amber" style="margin-top:12px;" id="tukey-note">Treatments sharing a letter are not significantly different (α = 0.05)</div>
+          </div>
+          <div class="card">
+            <div class="card-title"><span class="cicon">📋</span> Means table</div>
+            <div style="overflow-x:auto;"><table class="data-table" id="means-table"><thead></thead><tbody></tbody></table></div>
+          </div>
+        </div>
+
+        <div id="atab-anova" style="display:none;">
+          <div class="card">
+            <div class="card-title"><span class="cicon">🔢</span> Analysis of variance</div>
+            <div style="overflow-x:auto;"><table class="data-table mono" id="anova-table"><thead></thead><tbody></tbody></table></div>
+            <div style="font-size:12px;color:var(--text2);margin-top:10px;">Significance: *** p&lt;0.001 · ** p&lt;0.01 · * p&lt;0.05 · ns p≥0.05</div>
+          </div>
+          <div class="card">
+            <div class="card-title"><span class="cicon">📈</span> Residual diagnostics</div>
+            <div class="chart-wrap" style="height:220px;"><canvas id="resid-chart" role="img" aria-label="Residual plot">Residual values vs fitted values.</canvas></div>
+          </div>
+        </div>
+
+        <div id="atab-econ" style="display:none;">
+          <div class="card">
+            <div class="card-title"><span class="cicon">💰</span> Economic analysis</div>
+            <div class="form-row col2">
+              <div class="form-group"><label class="form-label">Commodity price ($/unit)</label><input type="number" id="econ-price" value="4.50" step="0.05" onchange="calcEcon()"></div>
+              <div class="form-group"><label class="form-label">Treatment cost ($/unit input)</label><input type="number" id="econ-cost" value="0.45" step="0.01" onchange="calcEcon()"></div>
+            </div>
+            <div style="overflow-x:auto;"><table class="data-table" id="econ-table"><thead><tr><th>Treatment</th><th>Mean yield</th><th>Gross revenue</th><th>Input cost</th><th>Net return</th><th>vs Control</th></tr></thead><tbody id="econ-body"></tbody></table></div>
+            <div id="econ-rec" class="info-box green" style="margin-top:12px;display:none;"></div>
+          </div>
+        </div>
+
+        <div id="atab-report" style="display:none;">
+          <div class="card">
+            <div class="card-title"><span class="cicon">📄</span> Trial report</div>
+            <div id="report-preview" class="report-section"></div>
+            <div class="btn-row">
+              <button class="btn btn-primary" onclick="exportPDF()">⬇️ Download PDF report</button>
+              <button class="btn btn-secondary" onclick="exportCSV()">⬇️ Export data CSV</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== SEASONS PAGE ==================== -->
+    <div class="page" id="page-seasons">
+      <div class="page-header">
+        <div class="page-title">Multi-Season Comparison</div>
+        <div class="page-sub">Compare trial results across growing seasons</div>
+      </div>
+
+      <div class="form-row col2">
+        <div class="form-group">
+          <label class="form-label">Select trial type to compare</label>
+          <select id="season-trial-filter" onchange="buildSeasonComparison()">
+            <option value="">— All trials —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Treatment to track</label>
+          <select id="season-trt-filter" onchange="buildSeasonComparison()">
+            <option value="">— All treatments —</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span class="cicon">📅</span> Year-over-year performance</div>
+        <div class="season-chart-wrap"><canvas id="season-chart" role="img" aria-label="Year over year yield comparison chart">Year over year yield data.</canvas></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span class="cicon">📋</span> Season summary table</div>
+        <div style="overflow-x:auto;">
+          <table class="data-table" id="season-table">
+            <thead><tr><th>Season</th><th>Trial</th><th>Best treatment</th><th>Mean yield</th><th>% over control</th><th>p-value</th></tr></thead>
+            <tbody id="season-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /app -->
+
+<!-- MODAL: Season selector -->
+<div class="modal-overlay" id="season-modal">
+  <div class="modal-box">
+    <div class="modal-title">📅 Manage seasons</div>
+    <div id="season-list" style="margin-bottom:12px;"></div>
+    <div class="form-row col2">
+      <div class="form-group"><label class="form-label">Add season / year</label><input type="text" id="new-season-input" placeholder="e.g. 2026"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('season-modal')">Close</button>
+      <button class="btn btn-primary" onclick="addSeason()">+ Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: Edit observation -->
+<div class="modal-overlay" id="edit-obs-modal">
+  <div class="modal-box">
+    <div class="modal-title">✏️ Edit observation</div>
+    <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Value</label><input type="number" id="edit-obs-val" step="0.1"></div>
+    <div class="form-group" style="margin-bottom:12px;"><label class="form-label">Notes</label><textarea id="edit-obs-notes"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('edit-obs-modal')">Cancel</button>
+      <button class="btn btn-danger" onclick="deleteObsFromModal()">Delete</button>
+      <button class="btn btn-primary" onclick="saveEditObs()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="app.js"></script>
+
+<!-- PWA Service Worker registration -->
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .then(r => console.log('SW registered'))
+      .catch(e => console.log('SW registration failed', e));
+  });
+}
+</script>
+</body>
+</html>
