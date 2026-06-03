@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<meta name="description" content="FieldStat - On-Farm Trial Planning, Data Collection & Statistical Analysis">
+<meta name="description" content="FarmPRISM - On-Farm Trial Planning, Data Collection & Statistical Analysis">
 <meta name="theme-color" content="#2d5a1b">
-<title>FieldStat – On-Farm Trial Platform</title>
+<title>FarmPRISM – Plot Research & Integrated Statistical Management</title>
 
 <!-- PWA manifest inline -->
 <!-- manifest.json for PWA -->
@@ -300,7 +300,7 @@ input,select,textarea,button{font-family:inherit;}
   <div class="topbar">
     <a class="logo" href="#">
       <div class="logo-mark">🌱</div>
-      <span class="logo-text">FieldStat</span>
+      <span class="logo-text">FarmPRISM</span>
     </a>
     <div class="offline-badge" id="offline-badge">Offline</div>
     <div class="spacer"></div>
@@ -553,10 +553,16 @@ input,select,textarea,button{font-family:inherit;}
       <div id="design-step-5" style="display:none;">
         <div class="card">
           <div class="card-title"><span class="cicon">📍</span> GPS plot layout (optional)</div>
-          <div class="info-box blue">Click on the map to set the origin corner of your trial. Then use the controls to orient and size the plot grid to match your field.</div>
+          <div class="info-box blue" style="margin-bottom:12px;">
+            <strong>How to use:</strong> Click 📍 to jump to your location, then use satellite view to find your field.
+            Click <strong>Draw trial area</strong> and drag a rectangle over your field — FarmPRISM will automatically
+            generate all your plots inside it based on your plot dimensions and design. You can rotate the grid to match your field orientation.
+          </div>
           <div class="map-controls">
-            <button class="btn btn-secondary" id="btn-locate" onclick="locateUser()">📍 My location</button>
-            <button class="btn btn-secondary" onclick="toggleDrawMode()">✏️ Draw plots</button>
+            <button class="btn btn-secondary" onclick="locateUser()">📍 My location</button>
+            <button class="btn btn-secondary" id="draw-rect-btn" onclick="startRectDraw()">⬜ Draw trial area</button>
+            <button class="btn btn-secondary" onclick="rotateGrid(-15)">↺ Rotate −15°</button>
+            <button class="btn btn-secondary" onclick="rotateGrid(15)">↻ Rotate +15°</button>
             <button class="btn btn-secondary" onclick="clearMapPlots()">🗑️ Clear</button>
             <select id="map-basemap" onchange="changeBasemap(this.value)" style="font-size:13px;padding:6px 10px;border:var(--border);border-radius:var(--radius-sm);background:var(--surface2);color:var(--text);">
               <option value="satellite">Satellite</option>
@@ -564,7 +570,7 @@ input,select,textarea,button{font-family:inherit;}
             </select>
           </div>
           <div id="leaflet-map"></div>
-          <div id="gps-plot-info" style="font-size:12px;color:var(--text2);margin-top:8px;"></div>
+          <div id="gps-plot-info" style="font-size:12px;color:var(--text2);margin-top:8px;padding:8px;background:var(--surface2);border-radius:var(--radius-sm);display:none;"></div>
           <div class="btn-row" style="margin-top:14px;">
             <button class="btn btn-secondary" onclick="designStep(4)">← Back</button>
             <button class="btn btn-primary" onclick="saveTrial()">✅ Save trial & begin collecting →</button>
@@ -874,9 +880,16 @@ input,select,textarea,button{font-family:inherit;}
 <script src="js/weather.js"></script>
 <script src="js/yield-import.js"></script>
 <script src="js/features.js"></script>
+<script src="js/gps-plots.js"></script>
+<script src="js/reports.js"></script>
 <script src="js/extensions.js"></script>
 <script src="app.js"></script>
 
+<!-- Override old GPS functions with new module -->
+<script>
+// These will be overridden by gps-plots.js
+var _gpsModuleLoaded = false;
+</script>
 <!-- PWA Service Worker registration -->
 <script>
 if ('serviceWorker' in navigator) {
