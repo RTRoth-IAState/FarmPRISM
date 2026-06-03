@@ -23,12 +23,10 @@ showPage = function(id, btn) {
 
 // ── WEATHER PAGE ──────────────────────────────────────────────
 function initWeatherPage() {
-  const sel = document.getElementById('weather-trial-select');
-  sel.innerHTML = '<option value="">— Select trial —</option>' +
-    appState.trials.map(t => `<option value="${t.id}">${t.name} (${t.season})</option>`).join('');
+  populateAllSelectors();
   if (currentCollectTrialId) {
-    sel.value = currentCollectTrialId;
-    loadTrialWeather();
+    const sel = document.getElementById('weather-trial-select');
+    if (sel) { sel.value = currentCollectTrialId; loadTrialWeather(); }
   }
 }
 
@@ -118,9 +116,7 @@ function initPowerPage() {
 
 // ── IMPORT PAGE ───────────────────────────────────────────────
 function initImportPage() {
-  const sel = document.getElementById('import-trial-select');
-  sel.innerHTML = '<option value="">— Select trial —</option>' +
-    appState.trials.map(t => `<option value="${t.id}">${t.name} (${t.season})</option>`).join('');
+  populateAllSelectors();
 }
 
 function loadImportTrial() {
@@ -131,82 +127,30 @@ function loadImportTrial() {
   renderImportPanel('import-panel', trial, () => {});
 }
 
-// ── EXTEND ANALYZE PAGE — outlier flagging + report templates ──
+// ── EXTEND ANALYZE PAGE — outlier flagging + rich reports ──
 const _originalRenderAnalysis = renderAnalysis;
 renderAnalysis = function(trial, result, data) {
   _originalRenderAnalysis(trial, result, data);
 
-  // Outlier detection
+  // Outlier detection — inject above tabs
   const obs = appState.observations.filter(o => o.trialId === trial.id && !o.excluded);
   const outliers = detectOutliers(obs, trial.plots || []);
-  if (outliers.length) {
-    // Inject outlier panel before the tabs
-    const tabsEl = document.querySelector('#page-analyze .tabs');
-    if (tabsEl) {
-      let outlierDiv = document.getElementById('outlier-panel');
-      if (!outlierDiv) {
-        outlierDiv = document.createElement('div');
-        outlierDiv.id = 'outlier-panel';
-        tabsEl.parentNode.insertBefore(outlierDiv, tabsEl);
-      }
-      renderOutlierPanel('outlier-panel', outliers);
+  const tabsEl = document.querySelector('#page-analyze .tabs');
+  if (tabsEl) {
+    let outlierDiv = document.getElementById('outlier-panel');
+    if (!outlierDiv) {
+      outlierDiv = document.createElement('div');
+      outlierDiv.id = 'outlier-panel';
+      outlierDiv.style.marginBottom = '14px';
+      tabsEl.parentNode.insertBefore(outlierDiv, tabsEl);
     }
+    if (outliers.length) renderOutlierPanel('outlier-panel', outliers);
+    else outlierDiv.innerHTML = '';
   }
 
-  // Extend report tab with audience selector + sharing
-  extendReportTab(trial, result, data);
+  // Use rich report module
+  renderFullReportTab(trial, result, data);
 };
-
-function extendReportTab(trial, result, data) {
-  const reportDiv = document.getElementById('atab-report');
-  if (!reportDiv) return;
-
-  // Add audience selector and sharing panel after existing report content
-  const extras = document.createElement('div');
-  extras.id = 'report-extras';
-  extras.innerHTML = `
-    <div class="card" style="margin-top:14px;">
-      <div class="card-title"><span class="cicon">📄</span> Report style</div>
-      <div class="tabs">
-        <button class="tab-btn active" onclick="switchReportTemplate('farmer', this)">Farmer summary</button>
-        <button class="tab-btn" onclick="switchReportTemplate('agronomist', this)">Agronomist report</button>
-      </div>
-      <div id="report-template-content"></div>
-    </div>
-    <div id="sharing-panel" style="margin-top:14px;"></div>
-  `;
-
-  // Remove old extras if present
-  const old = document.getElementById('report-extras');
-  if (old) old.remove();
-  reportDiv.appendChild(extras);
-
-  // Render sharing panel
-  renderSharingPanel('sharing-panel', trial.id);
-
-  // Default to farmer summary
-  switchReportTemplate('farmer', document.querySelector('#report-extras .tab-btn'), trial, result, data);
-
-  // Store for template switching
-  window._reportTrialData = { trial, result, data };
-}
-
-function switchReportTemplate(type, btn, trial, result, data) {
-  // Use stored data if not passed
-  if (!trial && window._reportTrialData) {
-    ({ trial, result, data } = window._reportTrialData);
-  }
-  if (!trial) return;
-
-  document.querySelectorAll('#report-extras .tab-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-
-  const container = document.getElementById('report-template-content');
-  if (!container) return;
-  container.innerHTML = type === 'farmer'
-    ? renderFarmerSummaryReport(trial, result, data)
-    : renderAgronomistReport(trial, result, data);
-}
 
 // ── EXTEND COLLECT PAGE — photo capture in plot cards ─────────
 const _originalBuildPlotGrid = buildPlotGrid;
@@ -326,7 +270,37 @@ function renderLocalBenchmark() {
   `;
 }
 
+// ── TRIAL STATE — ensure new trials populate all page selectors ──
+const _origSaveTrial = typeof saveTrial !== 'undefined' ? saveTrial : null;
+
+function populateAllSelectors() {
+  const trialOptions = '<option value="">— Select trial —</option>' +
+    appState.trials.map(t => `<option value="${t.id}">${t.name} (${t.season})</option>`).join('');
+  ['collect-trial-select','analyze-trial-select','weather-trial-select','import-trial-select'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = trialOptions;
+  });
+  // Restore current selections
+  if (currentCollectTrialId) {
+    const cs = document.getElementById('collect-trial-select');
+    if (cs) cs.value = currentCollectTrialId;
+  }
+  if (currentAnalyzeTrialId) {
+    const as = document.getElementById('analyze-trial-select');
+    if (as) as.value = currentAnalyzeTrialId;
+  }
+}
+
+// Patch showPage to always repopulate selectors when switching pages
+const _origShowPageExt = showPage;
+showPage = function(id, btn) {
+  _origShowPageExt(id, btn);
+  // After any page switch, ensure all selectors are current
+  setTimeout(populateAllSelectors, 50);
+};
+
 // ── CHECK FOR SHARED TRIAL ON LOAD ────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   checkForSharedTrial();
+  setTimeout(populateAllSelectors, 200);
 });
